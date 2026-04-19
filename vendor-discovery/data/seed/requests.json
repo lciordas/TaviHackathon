@@ -1,0 +1,366 @@
+{
+  "_meta": {
+    "description": "Seed work-order requests for vendor-discovery v0. Each entry pairs the raw facility-manager chat (as a monolithic ground-truth message AND as a phased sequence of user turns) with the structured work_order that intake would have extracted from the conversation. Vendor discovery consumes the work_order to find + score candidate vendors; the chat payload is retained for intake-LLM regression testing (can it extract correctly from a single shot? can it ask the right follow-ups when info arrives in pieces?) and for downstream grounding.",
+    "schema_version": 2,
+    "schema_notes": {
+      "chat.message": "Monolithic single-shot version — everything the FM would say if they typed it all at once. Use as ground truth for extraction coverage.",
+      "chat.turns": "Phased customer-only messages from the frontend chatbox, timestamped. No bot turns included — the intake LLM's job is to decide what to ask between turns. Content across all turns contains the same information as chat.message."
+    },
+    "generated_at": "2026-04-19T23:05:00Z",
+    "count": 10,
+    "trade_coverage": ["plumbing", "hvac", "electrical", "lawncare", "handyman", "appliance_repair"],
+    "urgency_coverage": ["emergency", "urgent", "scheduled", "flexible"]
+  },
+  "requests": [
+    {
+      "request_id": "req_001",
+      "chat": {
+        "message": "Hey, this is Jordan over at FM Holdings. I've got an active leak at our Walmart at 2304 Stemmons Trail in Dallas. Water is pouring out of the wall by the women's restroom. The store manager, Maria Hernandez, just called me — it started maybe 20 minutes ago. I need someone out there ASAP, within the next two hours if possible. Store closes at 11 PM so we need this sorted before we get deeper. I'm willing to pay emergency rate, up to about fifteen hundred dollars. Vendor needs to be licensed and insured, this is commercial. Maria will be on site until close. Have them pull around to the dock at the rear for parking.",
+        "turns": [
+          {"content": "emergency — active water leak at our dallas walmart. need someone out ASAP", "sent_at": "2026-04-19T19:20:15Z"},
+          {"content": "2304 stemmons trail. water pouring from the wall by the womens restroom, started maybe 20 min ago", "sent_at": "2026-04-19T19:20:52Z"},
+          {"content": "willing to pay emergency rate up to $1500. store closes at 11pm so needs to be fixed before then", "sent_at": "2026-04-19T19:22:05Z"},
+          {"content": "has to be licensed + insured, this is commercial. store mgr maria hernandez onsite til close — have them pull around to the rear dock for parking", "sent_at": "2026-04-19T19:23:11Z"}
+        ],
+        "submitted_at": "2026-04-19T19:23:11Z",
+        "submitted_by": "fm_jordan_keller",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_001",
+        "created_at": "2026-04-19T19:24:08Z",
+        "created_by": "fm_jordan_keller",
+        "trade": "plumbing",
+        "description": "Active water leak from wall near women's restroom at commercial Walmart location; needs immediate repair before 11pm close.",
+        "address_line": "2304 Stemmons Trail",
+        "city": "Dallas",
+        "state": "TX",
+        "zip": "75207",
+        "lat": 32.8095,
+        "lng": -96.8836,
+        "access_notes": "Manager Maria Hernandez on-site until 11pm close; vendor parking at rear dock.",
+        "urgency": "emergency",
+        "scheduled_for": "2026-04-19T21:30:00Z",
+        "budget_cap_cents": 150000,
+        "quality_threshold": 4.0,
+        "requires_licensed": true,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_002",
+      "chat": {
+        "message": "Setting up Q2 drain maintenance for our Charlotte headquarters at 5950 Fairview Rd, SouthPark area. About 14,000 square feet, 8 bathrooms across floors 2 and 3. Last vendor charged us around $650 for the full sweep last quarter. Want to book for next Tuesday, April 28th, ideally starting after 2 PM so it doesn't disrupt morning traffic. Budget's $800. Not a big job so I don't need a master plumber but they need to be insured — we can't have anyone in the building uncovered. Night manager can give access after 6 PM if Tuesday afternoon doesn't work.",
+        "turns": [
+          {"content": "hi — need to schedule q2 drain maintenance at our charlotte HQ", "sent_at": "2026-04-19T15:44:35Z"},
+          {"content": "address is 5950 fairview rd, southpark area. ~14k sq ft, 8 bathrooms across floors 2 and 3", "sent_at": "2026-04-19T15:45:20Z"},
+          {"content": "last vendor did the full sweep for $650 last quarter. budget is $800 this time. want to book for next tuesday apr 28, ideally starting after 2pm so it doesnt disrupt morning traffic", "sent_at": "2026-04-19T15:46:10Z"},
+          {"content": "dont need a master plumber for this but they have to be insured — we cant have anyone in the building uncovered. if tues afternoon doesnt work, night manager can give access after 6pm", "sent_at": "2026-04-19T15:47:02Z"}
+        ],
+        "submitted_at": "2026-04-19T15:47:02Z",
+        "submitted_by": "fm_sarah_ng",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_002",
+        "created_at": "2026-04-19T15:48:15Z",
+        "created_by": "fm_sarah_ng",
+        "trade": "plumbing",
+        "description": "Quarterly drain maintenance sweep across 8 bathrooms in 14,000 sqft Charlotte corporate HQ.",
+        "address_line": "5950 Fairview Rd",
+        "city": "Charlotte",
+        "state": "NC",
+        "zip": "28210",
+        "lat": 35.1649,
+        "lng": -80.8347,
+        "access_notes": "After-hours access via night manager at security desk; bathrooms on floors 2 and 3.",
+        "urgency": "scheduled",
+        "scheduled_for": "2026-04-28T18:00:00Z",
+        "budget_cap_cents": 80000,
+        "quality_threshold": 3.5,
+        "requires_licensed": false,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_003",
+      "chat": {
+        "message": "Emergency — our Phoenix restaurant's AC unit is dead. We're at 2825 N Central Ave. It's 108 degrees outside, servers are dripping, customers are walking out mid-meal. Need someone here TODAY no matter the cost. Up to $3,500 for a same-day fix. Restaurant's open till 10 PM. Has to be licensed — commercial HVAC. Manager is Brett, he'll be on-site till close. Enter from the E McDowell side, rear alley for deliveries and equipment.",
+        "turns": [
+          {"content": "our phoenix restaurant AC unit is dead and its 108 outside. customers are literally walking out mid-meal", "sent_at": "2026-04-19T20:13:42Z"},
+          {"content": "2825 N Central Ave. need someone TODAY no matter the cost. up to $3500 for same-day fix. open til 10pm", "sent_at": "2026-04-19T20:14:35Z"},
+          {"content": "has to be licensed, commercial HVAC. manager brett onsite til close. enter from the E McDowell side, rear alley for equipment", "sent_at": "2026-04-19T20:15:38Z"}
+        ],
+        "submitted_at": "2026-04-19T20:15:38Z",
+        "submitted_by": "fm_kelly_ortiz",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_003",
+        "created_at": "2026-04-19T20:17:41Z",
+        "created_by": "fm_kelly_ortiz",
+        "trade": "hvac",
+        "description": "AC unit completely down at Phoenix restaurant during 108F heat; customers leaving; same-day commercial HVAC fix needed.",
+        "address_line": "2825 N Central Ave",
+        "city": "Phoenix",
+        "state": "AZ",
+        "zip": "85004",
+        "lat": 33.4775,
+        "lng": -112.0738,
+        "access_notes": "Manager Brett on-site till 10pm; enter from E McDowell side, equipment via rear alley.",
+        "urgency": "emergency",
+        "scheduled_for": "2026-04-19T22:00:00Z",
+        "budget_cap_cents": 350000,
+        "quality_threshold": null,
+        "requires_licensed": true,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_004",
+      "chat": {
+        "message": "Looking to schedule Q2 HVAC preventative maintenance at our Five Below at 1163 Howell Mill Rd NW, Atlanta. Two rooftop units, roughly 5 tons each, both pretty standard. Want it done within the next 2-3 weeks, ideally a weekday morning before we open at 10 AM. Budget around $400. Insured required, license preferred but not a hard blocker. Rooftop access is via interior ladder at the receiving area, and our building manager opens at 7 AM on weekdays.",
+        "turns": [
+          {"content": "want to set up q2 HVAC preventative maintenance at our atlanta five below", "sent_at": "2026-04-19T14:30:18Z"},
+          {"content": "1163 howell mill rd NW. two rooftop units, roughly 5 tons each, both pretty standard", "sent_at": "2026-04-19T14:30:55Z"},
+          {"content": "anytime in the next 2-3 weeks works, ideally a weekday morning before we open at 10am", "sent_at": "2026-04-19T14:31:45Z"},
+          {"content": "budget is around $400. insured required, licensed preferred but not a hard blocker", "sent_at": "2026-04-19T14:32:20Z"},
+          {"content": "rooftop access is via interior ladder at the receiving area; our building manager opens at 7am on weekdays", "sent_at": "2026-04-19T14:33:12Z"}
+        ],
+        "submitted_at": "2026-04-19T14:33:12Z",
+        "submitted_by": "fm_david_patel",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_004",
+        "created_at": "2026-04-19T14:34:50Z",
+        "created_by": "fm_david_patel",
+        "trade": "hvac",
+        "description": "Q2 preventative maintenance on two ~5-ton rooftop units at Five Below retail location.",
+        "address_line": "1163 Howell Mill Rd NW",
+        "city": "Atlanta",
+        "state": "GA",
+        "zip": "30318",
+        "lat": 33.7837,
+        "lng": -84.4180,
+        "access_notes": "Rooftop access via interior ladder at receiving; building manager opens 7am weekdays.",
+        "urgency": "scheduled",
+        "scheduled_for": "2026-04-29T11:30:00Z",
+        "budget_cap_cents": 40000,
+        "quality_threshold": 4.0,
+        "requires_licensed": false,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_005",
+      "chat": {
+        "message": "Getting intermittent breaker trips on the refrigeration circuit at the Houston Target, 8500 S Main St. Coolers are holding temp for now but the breaker has tripped three times in the last hour. Worried about overnight. Want an electrician out tomorrow morning, ideally 7 AM before we open at 8. Budget up to $750 for diagnostic + fix. Licensed and insured, commercial required. The refrigeration panel is in the back-of-house closet, left of the produce cooler. Have them check in at customer service desk.",
+        "turns": [
+          {"content": "getting intermittent breaker trips on the refrigeration circuit at our houston target. 3 trips in the last hour", "sent_at": "2026-04-19T21:00:25Z"},
+          {"content": "8500 S Main St. coolers still holding temp but im worried about overnight", "sent_at": "2026-04-19T21:01:05Z"},
+          {"content": "want an electrician out tomorrow morning, ideally 7am before we open at 8. budget up to $750 for diagnostic + fix", "sent_at": "2026-04-19T21:01:58Z"},
+          {"content": "licensed + insured, commercial required. refrigeration panel is in the BOH closet, left of the produce cooler. have them check in at customer service desk", "sent_at": "2026-04-19T21:02:49Z"}
+        ],
+        "submitted_at": "2026-04-19T21:02:49Z",
+        "submitted_by": "fm_renee_kim",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_005",
+        "created_at": "2026-04-19T21:04:22Z",
+        "created_by": "fm_renee_kim",
+        "trade": "electrical",
+        "description": "Intermittent breaker trips on refrigeration circuit at Houston Target; 3 trips in the last hour; needs diagnosis and repair before morning open.",
+        "address_line": "8500 S Main St",
+        "city": "Houston",
+        "state": "TX",
+        "zip": "77025",
+        "lat": 29.6837,
+        "lng": -95.4032,
+        "access_notes": "Refrigeration panel in back-of-house closet, left of produce cooler; check in at customer service desk.",
+        "urgency": "urgent",
+        "scheduled_for": "2026-04-20T12:00:00Z",
+        "budget_cap_cents": 75000,
+        "quality_threshold": 4.2,
+        "requires_licensed": true,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_006",
+      "chat": {
+        "message": "Outfitting a new Anytime Fitness at 12300 N Lamar Blvd, Austin. Construction wraps in about 2 weeks (target Apr 30). Need an electrician on-site the following Monday, May 4th, 8 AM start. Scope: install 14 dedicated 20A circuits for cardio equipment and 4 240V outlets for the hardline machines. Should be a full-day job. Estimating $4,500 based on bids we got for the previous build. Licensed required, TX master electrician preferred. Site is mid-construction so coordinate with our GC Jared Wynn, 512-555-0117. Drawings in the trailer on site.",
+        "turns": [
+          {"content": "we're outfitting a new anytime fitness and need an electrician for the buildout", "sent_at": "2026-04-19T17:15:38Z"},
+          {"content": "12300 N Lamar Blvd, austin. construction wraps in about 2 weeks (target apr 30)", "sent_at": "2026-04-19T17:16:22Z"},
+          {"content": "scope is 14 dedicated 20A circuits for cardio equipment + 4 240V outlets for the hardline machines. should be a full-day job", "sent_at": "2026-04-19T17:17:10Z"},
+          {"content": "want them onsite the following monday, may 4th, 8am start. estimating around $4500 based on bids from our previous build", "sent_at": "2026-04-19T17:18:05Z"},
+          {"content": "licensed required, TX master electrician preferred. site is mid-construction so coordinate with our GC jared wynn at 512-555-0117. drawings are in the onsite trailer", "sent_at": "2026-04-19T17:19:05Z"}
+        ],
+        "submitted_at": "2026-04-19T17:19:05Z",
+        "submitted_by": "fm_marcus_lee",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_006",
+        "created_at": "2026-04-19T17:20:33Z",
+        "created_by": "fm_marcus_lee",
+        "trade": "electrical",
+        "description": "New Anytime Fitness buildout: install 14 dedicated 20A circuits and 4 240V outlets; full-day scope.",
+        "address_line": "12300 N Lamar Blvd",
+        "city": "Austin",
+        "state": "TX",
+        "zip": "78753",
+        "lat": 30.4184,
+        "lng": -97.6857,
+        "access_notes": "Site mid-construction; coordinate with GC Jared Wynn (512-555-0117); drawings in on-site trailer.",
+        "urgency": "scheduled",
+        "scheduled_for": "2026-05-04T13:00:00Z",
+        "budget_cap_cents": 450000,
+        "quality_threshold": 4.0,
+        "requires_licensed": true,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_007",
+      "chat": {
+        "message": "Want to set up a weekly mowing contract at our Nashville office park, 4800 Centennial Blvd. About 2 acres of lawn plus hedge trimming on the front entrance row. Looking for a recurring vendor for the rest of the season (through October). Target around $200/week, willing to go to $250 for quality. First visit Thursday this week around 1 PM would be great. Insured, but don't care about licensure for lawncare. Open access, no gate — mow the front lot plus both sides of the main building.",
+        "turns": [
+          {"content": "looking to set up a weekly mowing contract at our nashville office park", "sent_at": "2026-04-19T16:02:50Z"},
+          {"content": "4800 centennial blvd. ~2 acres of lawn plus hedge trimming on the front entrance row", "sent_at": "2026-04-19T16:03:35Z"},
+          {"content": "want a recurring vendor through the rest of the season (through october). first visit this thursday around 1pm would be great", "sent_at": "2026-04-19T16:04:18Z"},
+          {"content": "target ~$200/week, willing to go to $250 for quality. insured but not worried about licensure for lawncare. open access, no gate — mow the front lot + both sides of the main building", "sent_at": "2026-04-19T16:05:21Z"}
+        ],
+        "submitted_at": "2026-04-19T16:05:21Z",
+        "submitted_by": "fm_tonya_brooks",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_007",
+        "created_at": "2026-04-19T16:06:44Z",
+        "created_by": "fm_tonya_brooks",
+        "trade": "lawncare",
+        "description": "Weekly mowing + hedge trimming contract through season end at Nashville office park; ~2 acres of lawn plus front-entrance hedges.",
+        "address_line": "4800 Centennial Blvd",
+        "city": "Nashville",
+        "state": "TN",
+        "zip": "37209",
+        "lat": 36.1573,
+        "lng": -86.8392,
+        "access_notes": "Open access, no gate; mow front lot plus both sides of main building.",
+        "urgency": "flexible",
+        "scheduled_for": "2026-04-23T18:00:00Z",
+        "budget_cap_cents": 25000,
+        "quality_threshold": null,
+        "requires_licensed": false,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_008",
+      "chat": {
+        "message": "Need drywall repair + paint at our Tampa CVS, 3902 W Kennedy Blvd. Customer drove a shopping cart through the wall in the front-left aisle near pharmacy — hole is roughly 3x4 ft. Need the patch plus paint to match existing eggshell. Store closes at 10 PM so any evening work after that is fine. Not urgent, wanting it done next week. Budget $400. Insured required. Store manager Tonya can coordinate, 813-555-0212.",
+        "turns": [
+          {"content": "customer drove a shopping cart through the wall at our tampa CVS. need drywall repair + paint", "sent_at": "2026-04-19T15:39:40Z"},
+          {"content": "3902 W Kennedy Blvd. hole is in the front-left aisle near pharmacy, roughly 3x4 ft", "sent_at": "2026-04-19T15:40:20Z"},
+          {"content": "need a patch + paint to match existing eggshell. store closes 10pm so evening work after is fine. not urgent, wanting it done next week", "sent_at": "2026-04-19T15:41:12Z"},
+          {"content": "budget is $400. insured required. store manager tonya can coordinate, 813-555-0212", "sent_at": "2026-04-19T15:42:08Z"}
+        ],
+        "submitted_at": "2026-04-19T15:42:08Z",
+        "submitted_by": "fm_luis_alvarez",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_008",
+        "created_at": "2026-04-19T15:43:29Z",
+        "created_by": "fm_luis_alvarez",
+        "trade": "handyman",
+        "description": "Drywall patch (~3x4 ft hole) and paint-to-match eggshell after cart collision at Tampa CVS.",
+        "address_line": "3902 W Kennedy Blvd",
+        "city": "Tampa",
+        "state": "FL",
+        "zip": "33609",
+        "lat": 27.9456,
+        "lng": -82.5083,
+        "access_notes": "Wall is front-left aisle near pharmacy; coordinate with store manager Tonya at 813-555-0212; after-hours work OK post-10pm close.",
+        "urgency": "scheduled",
+        "scheduled_for": "2026-04-30T02:00:00Z",
+        "budget_cap_cents": 40000,
+        "quality_threshold": 3.8,
+        "requires_licensed": false,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_009",
+      "chat": {
+        "message": "Front entrance door at our Denver daycare (1875 Lawrence St) won't latch properly — security concern, kids are in the building. Parent dropoff starts at 7:15 AM so I need someone here BEFORE 7 AM tomorrow. Locksmith or handyman — whichever gets it done fastest. Budget up to $300. Insurance required, non-negotiable — we're a licensed daycare. Door is at the parent dropoff entrance on Lawrence St side.",
+        "turns": [
+          {"content": "front entrance door at our denver daycare wont latch properly — security concern, we have kids in the building", "sent_at": "2026-04-19T23:56:48Z"},
+          {"content": "1875 lawrence st. parent dropoff starts at 7:15am so need someone here BEFORE 7am tomorrow. locksmith or handyman, whichever gets it done fastest", "sent_at": "2026-04-19T23:57:42Z"},
+          {"content": "budget up to $300. insurance required, non-negotiable — we're a licensed daycare. door is at the parent dropoff entrance on lawrence st side", "sent_at": "2026-04-19T23:58:44Z"}
+        ],
+        "submitted_at": "2026-04-19T23:58:44Z",
+        "submitted_by": "fm_amanda_chen",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_009",
+        "created_at": "2026-04-19T23:59:51Z",
+        "created_by": "fm_amanda_chen",
+        "trade": "handyman",
+        "description": "Front entrance door at licensed daycare won't latch; security issue; needs repair before 7am parent dropoff.",
+        "address_line": "1875 Lawrence St",
+        "city": "Denver",
+        "state": "CO",
+        "zip": "80202",
+        "lat": 39.7494,
+        "lng": -104.9967,
+        "access_notes": "Door at parent dropoff entrance on Lawrence St side; must be on-site before 7am open.",
+        "urgency": "urgent",
+        "scheduled_for": "2026-04-20T12:15:00Z",
+        "budget_cap_cents": 30000,
+        "quality_threshold": 4.5,
+        "requires_licensed": false,
+        "requires_insured": true
+      }
+    },
+    {
+      "request_id": "req_010",
+      "chat": {
+        "message": "Walk-in cooler at our McDonald's at 4350 W Sahara Ave, Las Vegas, is running warm — temp's been creeping up since this morning, currently at 48°F (should be under 40). Lots of inventory at risk so we want a commercial appliance tech out today if possible, before tonight's rush. Up to $1,200. Licensed for commercial refrigeration required. Walk-in is in the back kitchen, off the prep line. Night manager Daniel can let in until 1 AM; day crew arrives at 4 AM.",
+        "turns": [
+          {"content": "walk-in cooler at our vegas mcdonalds is running warm. temp creeping up since this morning, currently 48°F (should be under 40)", "sent_at": "2026-04-19T22:09:28Z"},
+          {"content": "4350 W Sahara Ave. lots of inventory at risk — want a commercial appliance tech out today if possible, before tonights rush", "sent_at": "2026-04-19T22:10:15Z"},
+          {"content": "up to $1200. licensed for commercial refrigeration required", "sent_at": "2026-04-19T22:11:08Z"},
+          {"content": "walk-in is in the back kitchen, off the prep line. night manager daniel can let in til 1am, day crew arrives 4am", "sent_at": "2026-04-19T22:11:57Z"}
+        ],
+        "submitted_at": "2026-04-19T22:11:57Z",
+        "submitted_by": "fm_ryan_callahan",
+        "channel": "web_chat"
+      },
+      "work_order": {
+        "id": "wo_010",
+        "created_at": "2026-04-19T22:13:18Z",
+        "created_by": "fm_ryan_callahan",
+        "trade": "appliance_repair",
+        "description": "Walk-in cooler at Las Vegas McDonald's running warm (48F, spec <40F); commercial refrigeration repair needed same day.",
+        "address_line": "4350 W Sahara Ave",
+        "city": "Las Vegas",
+        "state": "NV",
+        "zip": "89102",
+        "lat": 36.1442,
+        "lng": -115.2055,
+        "access_notes": "Walk-in in back kitchen off prep line; night manager Daniel can let in until 1am, day crew arrives 4am.",
+        "urgency": "urgent",
+        "scheduled_for": "2026-04-20T01:00:00Z",
+        "budget_cap_cents": 120000,
+        "quality_threshold": 4.0,
+        "requires_licensed": true,
+        "requires_insured": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+[project]
+name = "tavi-intake"
+version = "0.1.0"
+description = "Tavi Work Order Intake — LLM-driven chat intake + SQLite persistence"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlalchemy>=2.0.25",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "anthropic>=0.39.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+]
+
+[tool.uv]
+package = false

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
@@ -285,9 +286,14 @@ export default function Home() {
   return (
     <div className="flex-1 flex flex-col bg-slate-50 text-slate-900">
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto max-w-6xl px-6 py-4">
-          <h1 className="text-xl font-semibold tracking-tight">Tavi — Work Order Intake</h1>
-          <p className="text-sm text-slate-500">Pick the service address, then chat with the agent.</p>
+        <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">Tavi — Work Order Intake</h1>
+            <p className="text-sm text-slate-500">Pick the service address, then chat with the agent.</p>
+          </div>
+          <Link href="/admin" className="text-sm text-slate-600 hover:text-slate-900 underline">
+            DB Explorer →
+          </Link>
         </div>
       </header>
 
@@ -380,8 +386,17 @@ export default function Home() {
             )}
             {submittedId && (
               <div className="flex justify-center pt-2">
-                <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-sm text-emerald-900">
-                  Submitted. Work order ID: <code className="font-mono text-xs">{submittedId}</code>
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-sm text-emerald-900 max-w-md">
+                  <div className="font-medium">Submitted.</div>
+                  <div className="mt-1 text-xs text-emerald-800">
+                    Work order <code className="font-mono">{submittedId.slice(0, 8)}</code> created. Vendor discovery is running in the background — results will appear in the DB Explorer in a few seconds.
+                  </div>
+                  <Link
+                    href="/admin"
+                    className="mt-2 inline-block text-xs font-medium text-emerald-900 underline hover:no-underline"
+                  >
+                    View in DB Explorer →
+                  </Link>
                 </div>
               </div>
             )}

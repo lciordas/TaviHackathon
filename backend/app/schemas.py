@@ -255,3 +255,25 @@ class DiscoveryRunResponse(BaseModel):
     run: DiscoveryRunRead
     ranked: list[RankedVendor]
     filtered: list[RankedVendor] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Admin DB explorer
+# ---------------------------------------------------------------------------
+
+
+class AdminNegotiationRead(NegotiationRead):
+    """Negotiation row with vendor display_name joined for readability."""
+
+    vendor_display_name: Optional[str] = None
+
+
+class AdminTableCounts(BaseModel):
+    work_orders: int
+    vendors: int
+    discovery_runs: int
+    negotiations: int
+
+
+class AdminOverview(BaseModel):
+    counts: AdminTableCounts

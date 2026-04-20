@@ -12,5 +12,8 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-haiku-4-5-20251001"
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    google_places_api_key: str | None = None
+    google_places_default_radius_m: int = 32186  # ~20 miles
+
 
 settings = Settings()

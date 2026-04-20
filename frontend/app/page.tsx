@@ -15,6 +15,22 @@ type ChatResponse = {
   missing: string[];
 };
 
+type Suggestion = {
+  place_id: string;
+  primary_text: string;
+  secondary_text: string;
+};
+
+type SelectedAddress = {
+  address_line: string;
+  city: string;
+  state: string;
+  zip: string;
+  lat: number;
+  lng: number;
+  formatted_address: string;
+};
+
 const AFFIRMATIVE = new Set([
   "y", "yes", "yeah", "yep", "yup", "ya",
   "ok", "okay", "k",
@@ -35,6 +51,12 @@ function isAffirmative(text: string): boolean {
 const FIELD_LABELS: Record<string, string> = {
   trade: "Trade",
   description: "Description",
+  address_line: "Street",
+  city: "City",
+  state: "State",
+  zip: "ZIP",
+  lat: "Latitude",
+  lng: "Longitude",
   access_notes: "Access notes",
   urgency: "Urgency",
   scheduled_for: "Scheduled for",
@@ -43,6 +65,8 @@ const FIELD_LABELS: Record<string, string> = {
   requires_licensed: "Licensed required",
   requires_insured: "Insured required",
 };
+
+const HIDDEN_FIELDS = new Set(["lat", "lng", "address_hint"]);
 
 function formatValue(key: string, value: unknown): string {
   if (value === null || value === undefined) return "—";
@@ -68,6 +92,14 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Address autocomplete state
+  const [addressQuery, setAddressQuery] = useState("");
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [addressPending, setAddressPending] = useState(false);
+  const [addressError, setAddressError] = useState<string | null>(null);
+  const [selectedAddress, setSelectedAddress] = useState<SelectedAddress | null>(null);
+  const [hintApplied, setHintApplied] = useState(false);
+
   useEffect(() => {
     fetch(`${API_BASE}/intake/start`, { method: "POST" })
       .then((r) => {
@@ -87,6 +119,97 @@ export default function Home() {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, pending]);
+
+  // Seed the autocomplete input from an LLM-extracted chat address ONCE, only
+  // if the user hasn't selected or typed anything yet. Lets the LLM surface
+  // addresses it notices in chat without clobbering manual edits.
+  useEffect(() => {
+    if (hintApplied || selectedAddress || addressQuery) return;
+    const hint = fields.address_hint;
+    if (typeof hint === "string" && hint.trim().length >= 4) {
+      setAddressQuery(hint.trim());
+      setHintApplied(true);
+    }
+  }, [fields, selectedAddress, addressQuery, hintApplied]);
+
+  // Debounced autocomplete lookup
+  useEffect(() => {
+    if (selectedAddress) return;
+    const q = addressQuery.trim();
+    if (q.length < 4) {
+      setSuggestions([]);
+      setAddressError(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setAddressPending(true);
+      setAddressError(null);
+      try {
+        const r = await fetch(`${API_BASE}/intake/places/autocomplete`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ query: q }),
+        });
+        if (!r.ok) {
+          const detail = await r.json().catch(() => ({}));
+          throw new Error(typeof detail.detail === "string" ? detail.detail : `autocomplete ${r.status}`);
+        }
+        const d: { suggestions: Suggestion[] } = await r.json();
+        setSuggestions(d.suggestions ?? []);
+      } catch (e: unknown) {
+        setAddressError(`Address lookup failed: ${String(e)}`);
+        setSuggestions([]);
+      } finally {
+        setAddressPending(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [addressQuery, selectedAddress]);
+
+  async function pickSuggestion(place_id: string) {
+    setAddressPending(true);
+    setAddressError(null);
+    try {
+      const r = await fetch(`${API_BASE}/intake/places/select`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ place_id }),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(typeof detail.detail === "string" ? detail.detail : `select ${r.status}`);
+      }
+      const d: SelectedAddress = await r.json();
+      setSelectedAddress(d);
+      setSuggestions([]);
+      setAddressQuery("");
+      setFields((prev) => ({
+        ...prev,
+        address_line: d.address_line,
+        city: d.city,
+        state: d.state,
+        zip: d.zip,
+        lat: d.lat,
+        lng: d.lng,
+      }));
+    } catch (e: unknown) {
+      setAddressError(`Couldn't resolve that address: ${String(e)}`);
+    } finally {
+      setAddressPending(false);
+    }
+  }
+
+  function clearAddress() {
+    setSelectedAddress(null);
+    setFields((prev) => {
+      const next = { ...prev };
+      for (const k of ["address_line", "city", "state", "zip", "lat", "lng"]) {
+        next[k] = null;
+      }
+      return next;
+    });
+    setIsReady(false);
+  }
 
   async function callChat(nextMessages: Message[]) {
     setPending(true);
@@ -156,7 +279,7 @@ export default function Home() {
   }
 
   const nonNullFields = Object.entries(fields).filter(
-    ([, v]) => v !== null && v !== undefined,
+    ([k, v]) => v !== null && v !== undefined && !HIDDEN_FIELDS.has(k),
   );
 
   return (
@@ -164,13 +287,74 @@ export default function Home() {
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto max-w-6xl px-6 py-4">
           <h1 className="text-xl font-semibold tracking-tight">Tavi — Work Order Intake</h1>
-          <p className="text-sm text-slate-500">Chat with the intake agent to file a work order.</p>
+          <p className="text-sm text-slate-500">Pick the service address, then chat with the agent.</p>
         </div>
       </header>
 
       <main className="flex-1 mx-auto w-full max-w-6xl px-6 py-6 grid grid-cols-1 md:grid-cols-3 gap-6">
-        <section className="md:col-span-2 flex flex-col h-[calc(100vh-10rem)] bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4">
+        <section className="md:col-span-2 flex flex-col bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          {/* Address autocomplete card */}
+          <div className="border-b border-slate-200 bg-slate-50 p-4">
+            <label className="block text-xs uppercase tracking-wide text-slate-500 mb-1.5">
+              Service address
+            </label>
+            {selectedAddress ? (
+              <div className="flex items-start justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
+                <div className="text-sm">
+                  <div className="font-medium text-emerald-900">{selectedAddress.formatted_address}</div>
+                  <div className="text-xs text-emerald-700 mt-0.5">
+                    {selectedAddress.lat.toFixed(5)}, {selectedAddress.lng.toFixed(5)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearAddress}
+                  disabled={!!submittedId}
+                  className="text-xs text-emerald-800 underline hover:no-underline disabled:text-emerald-400"
+                >
+                  Change
+                </button>
+              </div>
+            ) : (
+              <div className="relative">
+                <input
+                  type="text"
+                  value={addressQuery}
+                  onChange={(e) => setAddressQuery(e.target.value)}
+                  placeholder="Start typing the service address…"
+                  disabled={!!submittedId}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900 disabled:bg-slate-100"
+                />
+                {addressPending && (
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
+                    looking…
+                  </div>
+                )}
+                {suggestions.length > 0 && (
+                  <ul className="absolute z-10 mt-1 w-full rounded-lg border border-slate-200 bg-white shadow-lg max-h-72 overflow-y-auto">
+                    {suggestions.map((s) => (
+                      <li key={s.place_id}>
+                        <button
+                          type="button"
+                          onClick={() => void pickSuggestion(s.place_id)}
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-100 focus:bg-slate-100 focus:outline-none"
+                        >
+                          <div className="font-medium text-slate-900">{s.primary_text}</div>
+                          <div className="text-xs text-slate-500">{s.secondary_text}</div>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {addressError && (
+                  <div className="mt-2 text-xs text-red-700">{addressError}</div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Chat area */}
+          <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4 h-[calc(100vh-20rem)]">
             {messages.length === 0 && !error && (
               <div className="text-center text-sm text-slate-400 pt-12">Loading…</div>
             )}

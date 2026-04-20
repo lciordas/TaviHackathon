@@ -9,14 +9,21 @@ from .enums import Trade, Urgency
 
 
 # Fields that must be non-None before a work order can be persisted.
-# Address / lat / lng deliberately excluded — those belong to the deferred
-# Google Places integration.
+# Address + lat/lng are populated by the frontend's Google Places autocomplete
+# widget (not by the LLM), but they're still required for a valid order.
 REQUIRED_FIELDS: tuple[str, ...] = (
     "trade",
     "description",
+    "address_line",
+    "city",
+    "state",
+    "zip",
+    "lat",
+    "lng",
     "urgency",
     "scheduled_for",
     "budget_cap_cents",
+    "quality_threshold",
     "requires_licensed",
     "requires_insured",
 )
@@ -40,6 +47,10 @@ class WorkOrderPartial(BaseModel):
     zip: Optional[str] = None
     lat: Optional[float] = None
     lng: Optional[float] = None
+    # Transient: the LLM puts a free-text address it extracted from chat here
+    # so the UI's autocomplete input can seed from it. NOT persisted to DB —
+    # the frontend flow overwrites with the user-picked structured address.
+    address_hint: Optional[str] = None
     access_notes: Optional[str] = None
     urgency: Optional[Urgency] = None
     scheduled_for: Optional[datetime] = None
@@ -87,12 +98,12 @@ class WorkOrderRead(BaseModel):
     created_by: str
     trade: Trade
     description: str
-    address_line: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    zip: Optional[str] = None
-    lat: Optional[float] = None
-    lng: Optional[float] = None
+    address_line: str
+    city: str
+    state: str
+    zip: str
+    lat: float
+    lng: float
     access_notes: Optional[str] = None
     urgency: Urgency
     scheduled_for: datetime
@@ -105,3 +116,40 @@ class WorkOrderRead(BaseModel):
 class IntakeConfirmResponse(BaseModel):
     id: str
     work_order: WorkOrderRead
+
+
+# ---------------------------------------------------------------------------
+# Address autocomplete (Places API proxy — keeps API key server-side)
+# ---------------------------------------------------------------------------
+
+
+class PlacesAutocompleteRequest(BaseModel):
+    query: str = Field(min_length=1)
+    lat: Optional[float] = None  # optional bias toward user's rough area
+    lng: Optional[float] = None
+
+
+class PlacesAutocompleteSuggestion(BaseModel):
+    place_id: str
+    primary_text: str  # e.g., "2304 Stemmons Trail"
+    secondary_text: str  # e.g., "Dallas, TX 75207, USA"
+
+
+class PlacesAutocompleteResponse(BaseModel):
+    suggestions: list[PlacesAutocompleteSuggestion]
+
+
+class PlacesSelectRequest(BaseModel):
+    place_id: str
+
+
+class PlacesSelectResponse(BaseModel):
+    """Structured address + lat/lng for one selected suggestion."""
+
+    address_line: str
+    city: str
+    state: str
+    zip: str
+    lat: float
+    lng: float
+    formatted_address: str

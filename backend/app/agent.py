@@ -13,6 +13,7 @@ from .config import settings
 from .prompts import (
     PROFILE_ACK,
     SYSTEM_PROMPT_TEMPLATE,
+    USER_PROFILE,
     render_profile_message,
 )
 from .schemas import REQUIRED_FIELDS, ChatMessage, WorkOrderPartial
@@ -39,12 +40,12 @@ def run_turn(
         current_date=datetime.now(timezone.utc).isoformat(),
     )
 
-    # Prepend the hardcoded profile as a synthetic first user turn, followed
-    # by an assistant ack so roles alternate before the real messages.
-    api_messages: list[dict] = [
-        {"role": "user", "content": render_profile_message()},
-        {"role": "assistant", "content": PROFILE_ACK},
-    ]
+    # Only inject the hardcoded profile when USER_PROFILE has data. Blank
+    # profile means first-time user with no saved preferences.
+    api_messages: list[dict] = []
+    if USER_PROFILE:
+        api_messages.append({"role": "user", "content": render_profile_message()})
+        api_messages.append({"role": "assistant", "content": PROFILE_ACK})
     incoming = list(messages)
     while incoming and incoming[0].role == "assistant":
         incoming.pop(0)

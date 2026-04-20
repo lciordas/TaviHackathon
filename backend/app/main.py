@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .routers import intake
+from .routers import intake, places
 
 app = FastAPI(title="Tavi Intake")
 
@@ -17,6 +17,7 @@ app.add_middleware(
 )
 
 app.include_router(intake.router, prefix="/intake", tags=["intake"])
+app.include_router(places.router, prefix="/intake/places", tags=["places"])
 
 
 @app.get("/health")

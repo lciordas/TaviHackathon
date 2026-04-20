@@ -69,15 +69,30 @@ UPDATE_FIELDS_TOOL = {
             "quality_threshold": {
                 "type": "number",
                 "description": (
-                    "Minimum vendor composite score (0-5 scale). Infer "
-                    "from cues ('top-tier' ~ 4.5, 'solid' ~ 4.0, 'doesn't "
-                    "matter' ~ 3.0) or seed from the user profile default."
+                    "Minimum acceptable vendor star rating on a 1-5 scale. "
+                    "REQUIRED — always confirm a value with the user. If they "
+                    "don't express a preference (\"whatever\", \"don't care\", "
+                    "\"no preference\"), set to 4.0 and acknowledge it in your "
+                    "next reply so they can override. Map cues: 'top-tier' ~ "
+                    "4.5, 'solid' ~ 4.0, 'anything that works' ~ 3.0."
                 ),
             },
             "requires_licensed": {"type": "boolean"},
             "requires_insured": {
                 "type": "boolean",
                 "description": "Default true for any commercial job unless the user says otherwise.",
+            },
+            "address_hint": {
+                "type": "string",
+                "description": (
+                    "Free-text address the user mentioned in chat (e.g., \"2304 "
+                    "Stemmons Trail, Dallas\" or \"our Walmart on S Main St "
+                    "Houston\"). Populating this seeds the address-autocomplete "
+                    "input in the UI so the user can confirm/pick the precise "
+                    "Google Places match. NOT persisted — the user's picked "
+                    "address is what actually goes on the work order. Extract "
+                    "and set this as soon as you notice an address in the chat."
+                ),
             },
         },
         "additionalProperties": False,

@@ -29,14 +29,15 @@ class WorkOrder(Base):
     trade: Mapped[Trade] = mapped_column(SAEnum(Trade), index=True)
     description: Mapped[str] = mapped_column(Text)
 
-    # Address fields nullable for v0 — Google Places integration is deferred,
-    # so the LLM doesn't collect address in chat. Will tighten to NOT NULL later.
-    address_line: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    city: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    state: Mapped[Optional[str]] = mapped_column(String(2), nullable=True)
-    zip: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    lng: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Address comes from the frontend's Google Places autocomplete widget,
+    # not from the chat LLM. Required: vendor discovery needs lat/lng to
+    # compute distances.
+    address_line: Mapped[str] = mapped_column(String)
+    city: Mapped[str] = mapped_column(String)
+    state: Mapped[str] = mapped_column(String(2))
+    zip: Mapped[str] = mapped_column(String)
+    lat: Mapped[float] = mapped_column(Float)
+    lng: Mapped[float] = mapped_column(Float)
     access_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     urgency: Mapped[Urgency] = mapped_column(SAEnum(Urgency))

@@ -1,12 +1,12 @@
-"""FastAPI application entrypoint for Tavi intake."""
+"""FastAPI application entrypoint for Tavi backend."""
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .routers import intake, places
+from .routers import discovery, intake, places
 
-app = FastAPI(title="Tavi Intake")
+app = FastAPI(title="Tavi Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,6 +18,7 @@ app.add_middleware(
 
 app.include_router(intake.router, prefix="/intake", tags=["intake"])
 app.include_router(places.router, prefix="/intake/places", tags=["places"])
+app.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
 
 
 @app.get("/health")

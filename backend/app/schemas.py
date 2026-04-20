@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .enums import Trade, Urgency
+from .enums import EngagementStatus, Trade, Urgency
 
 
 # Fields that must be non-None before a work order can be persisted.
@@ -153,3 +153,105 @@ class PlacesSelectResponse(BaseModel):
     lat: float
     lng: float
     formatted_address: str
+
+
+# ---------------------------------------------------------------------------
+# Vendor discovery
+# ---------------------------------------------------------------------------
+
+
+class VendorRead(BaseModel):
+    """Public shape for one cached vendor."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    place_id: str
+    display_name: str
+    formatted_address: Optional[str] = None
+    lat: float
+    lng: float
+    types: list[str] = Field(default_factory=list)
+    business_status: Optional[str] = None
+
+    google_rating: Optional[float] = None
+    google_user_rating_count: Optional[int] = None
+    regular_opening_hours: Optional[dict[str, Any]] = None
+    utc_offset_minutes: Optional[int] = None
+    international_phone_number: Optional[str] = None
+    website_uri: Optional[str] = None
+    price_level: Optional[int] = None
+    emergency_service_24_7: bool = False
+
+    bbb_profile_url: Optional[str] = None
+    bbb_grade: Optional[str] = None
+    bbb_accredited: Optional[bool] = None
+    bbb_years_accredited: Optional[int] = None
+    bbb_complaints_total: Optional[int] = None
+    bbb_complaints_resolved: Optional[int] = None
+    years_in_business: Optional[int] = None
+
+    cumulative_score: Optional[float] = None
+    cumulative_score_breakdown: Optional[dict[str, Any]] = None
+
+    google_fetched_at: datetime
+    bbb_fetched_at: Optional[datetime] = None
+
+
+class NegotiationRead(BaseModel):
+    """Public shape for one (work_order × vendor) negotiation row."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    work_order_id: str
+    vendor_place_id: str
+    discovery_run_id: str
+
+    subjective_rank_score: Optional[float] = None
+    subjective_rank_breakdown: Optional[dict[str, Any]] = None
+    rank: Optional[int] = None
+
+    filtered: bool
+    filter_reasons: Optional[list[str]] = None
+
+    status: EngagementStatus
+
+    messages: Optional[list[dict[str, Any]]] = None
+    actions_log: Optional[list[dict[str, Any]]] = None
+
+    created_at: datetime
+    last_updated_at: datetime
+
+
+class RankedVendor(BaseModel):
+    """One ranked entry in the discovery response — joins Negotiation + Vendor."""
+
+    negotiation: NegotiationRead
+    vendor: VendorRead
+
+
+class DiscoveryRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    work_order_id: str
+    created_at: datetime
+    strategy: str
+    radius_miles: int
+    candidate_count: int
+    cache_hit_count: int
+    api_detail_calls: int
+    bbb_scrape_count: int
+    weight_profile: str
+    duration_ms: Optional[int] = None
+
+
+class DiscoveryRunRequest(BaseModel):
+    work_order_id: str
+    refresh: bool = False  # if True, ignore the 24h cached-run idempotency window
+
+
+class DiscoveryRunResponse(BaseModel):
+    run: DiscoveryRunRead
+    ranked: list[RankedVendor]
+    filtered: list[RankedVendor] = Field(default_factory=list)

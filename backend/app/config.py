@@ -15,5 +15,8 @@ class Settings(BaseSettings):
     google_places_api_key: str | None = None
     google_places_default_radius_m: int = 32186  # ~20 miles
 
+    bbb_user_agent: str = "TaviBot/0.1 (hackathon research)"
+    bbb_request_delay_s: float = 1.0
+
 
 settings = Settings()

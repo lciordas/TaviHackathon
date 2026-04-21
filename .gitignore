@@ -1,0 +1,5 @@
+# macOS metadata — can land at the repo root or in any subfolder.
+# Per-package .gitignores (backend/, frontend/) already ignore these locally;
+# this root file catches the ones at the top level + in docs/, vendor-discovery/, etc.
+.DS_Store
+**/.DS_Store

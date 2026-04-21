@@ -6,7 +6,7 @@ One repo, one project, three subparts — each developed in its own Claude Code 
 
 1. **Intake** (`backend/` + `frontend/`) — chat → structured work order. Done: chat intake, Google Places autocomplete for service address, SQLite persistence. On confirm, intake automatically kicks off subpart 2 as a background task.
 2. **Vendor discovery** (`backend/app/services/discovery/` + `backend/app/routers/discovery.py`) — work order → ranked nearby vendors. Done: live Google Places (new API) nearby search, BBB profile scrape, cumulative + urgency-aware subjective scoring, hard filters (distance / hours / quality threshold), `/discovery/run` endpoint, admin DB explorer. `vendor-discovery/` (top-level dir) holds archival fixture data from an earlier spike — not load-bearing.
-3. **Vendor contact / auctioning** — agentic outreach + engagement state machine + command center. Schema placeholders (`Negotiation.messages`, `actions_log`, `status` keyed to `EngagementStatus`) are already in the DB. Outreach / UI not yet started.
+3. **Vendor contact / auctioning** (`backend/app/services/negotiation/` + `frontend/app/work-orders/[id]/page.tsx`) — agentic outreach + 9-state machine + tick-driven scheduler + command-center UI. Done: LLM-backed Tavi Coordinator with 8-tool surface; simulated vendor agents with persona trait packs; scheduler with per-persona skip rolls, ghoster + refusal behaviors, silence timeouts; sequential booking flow with credential verification → confirmation → accept/decline; cached pitch template (one LLM call reused across every vendor's opening); mid-tick DB commits so the command-center UI streams messages in real time.
 
 ## Hackathon context
 
@@ -36,12 +36,13 @@ Three layers, same pattern across all three subparts:
    - `/intake/*` — chat turn, start, confirm (intake.py)
    - `/intake/places/*` — Google Places autocomplete proxy (places.py)
    - `/discovery/*` — vendor discovery runs (discovery.py)
+   - `/negotiations/*` — scheduler tick + per-work-order hydration for the command center (negotiations.py)
    - `/admin/*` — read-only DB views for the admin explorer (admin.py)
    - `/health` — liveness
 
 3. **Data & external services** (reached only through the backend):
    - **SQLite** via SQLAlchemy — primary store (file: `backend/tavi.db`)
-   - **Anthropic Claude** — field extraction + reply drafting (intake); will drive outreach drafting + vendor persona simulation in subpart 3
+   - **Anthropic Claude** — field extraction + reply drafting (intake); outreach drafting, cached pitch templating, vendor persona simulation, and per-turn booking / verification logic (subpart 3)
    - **Google Places API (new)** — autocomplete + place details (intake); nearby/text search + place details (discovery)
    - **BBB scrape** — enriches each vendor with grade / accreditation / complaint resolution / tenure for scoring
 
@@ -100,14 +101,15 @@ Given a submitted work order, discover candidate vendors within ~20 miles using 
 
 - `vendors` — cache keyed by Google `place_id`. Holds Google fields (display_name, rating, review count, hours, phone, website, 24/7 flag), BBB fields (grade, accreditation, complaints, years-in-business), and the computed `cumulative_score` + breakdown. Re-fetched only when stale.
 - `discovery_runs` — one row per `/discovery/run` invocation. Audit + cost tracking: candidate count, cache hits, API detail calls, BBB scrape count, duration, weight profile (urgency).
-- `negotiations` — one row per (work_order × vendor). Holds filter state, `quote_cents` (filled by subpart 3 when a vendor responds), `subjective_rank_score` + `rank` (also subpart-3 territory), engagement `status`, and placeholder `messages` / `actions_log` JSON columns.
+- `negotiations` — one row per (work_order × vendor). Discovery seeds it with `filtered` + `filter_reasons`; subpart 3 advances `state` (NegotiationState enum), fills `quoted_price_cents` + `quoted_available_at` when the vendor commits, writes `subjective_rank_score` + `rank` after ranking, and stashes freeform extracted facts (insurance/license verification, terminal reasons, ghoster/refusal flags, booking-confirmation timestamps) into the `attributes` JSON bag.
+- `negotiation_messages` — message thread per negotiation. One row per outbound Tavi message and per vendor reply, with `sender` (tavi/vendor), `channel` (email/sms/phone), `iteration` (the scheduler-tick on which it was written), and JSON `content` (`{text, subject?}`).
 
 ### Scoring (`scoring.py`)
 
 Two scores with very different lifecycles:
 
 - **`cumulative_score`** (objective, on `Vendor`) — **runs at discovery time.** Bayesian-adjusted Google rating (45%) + BBB grade (25%) + complaint resolution rate (10%) + tenure (20%). Missing signals drop out and remaining weights renormalize. Stable per vendor across customers.
-- **`subjective_rank_score`** (per-order, on `Negotiation`) — **does NOT run at discovery time.** Requires `Negotiation.quote_cents`, which only exists after subpart 3's outreach agent has contacted a vendor and received a price. Computed by `compute_subjective(cumulative_score, quote_cents, budget_cap_cents, weights: RankingWeights)`. Leaves a Negotiation's rank / subjective score null until a quote is in.
+- **`subjective_rank_score`** (per-order, on `Negotiation`) — **does NOT run at discovery time.** Requires `Negotiation.quoted_price_cents`, which only exists after subpart 3's outreach agent has contacted a vendor and received firm terms. Computed by `compute_subjective(cumulative_score, quote_cents, budget_cap_cents, weights: RankingWeights)` (the `quote_cents` parameter is passed `neg.quoted_price_cents`). Refreshed at the top of every tick so the command center shows a live leaderboard as quotes arrive.
 
 ### Filters (`filters.py`)
 
@@ -127,33 +129,132 @@ Hard filters applied before ranking: business status != operational, distance > 
 - `quality_threshold` is checked against the Bayesian-adjusted rating, not raw Google stars
 - Discovery does NOT rank — survivors land at `prospecting` with null rank / subjective score. Ranking is a subpart-3 job once vendors quote.
 
-## Subpart 3 — Vendor contact / auctioning (planned)
+## Subpart 3 — Vendor contact / auctioning (`backend/app/services/negotiation/` + `frontend/app/work-orders/[id]/page.tsx`)
 
-Agentic outreach across email / SMS / phone, unified per-engagement thread, kanban command center keyed to an engagement state machine (`prospecting → contacted → quoted → negotiating → dispatched → completed`, with `declined` / `ghosted` off-ramps). LLM-simulated vendor personas auto-respond when messaged. Outreach + UI not yet started, but the DB + scoring helpers are already wired:
+Fully autonomous agentic auction. A single tick button in the command center advances the scheduler by one iteration: Tavi pitches pending prospects, vendors reply (or skip, or refuse, or ghost), quotes land, credentials get verified, the top-ranked vendor gets booked, the rest get auto-declined. All driven by two LLM agents behind a state machine.
 
-- `EngagementStatus` enum in `backend/app/enums.py`
-- `Negotiation.status` defaults to `PROSPECTING` at discovery time
-- `Negotiation.quote_cents` (int, null until quote arrives) — input to the subjective-ranking formula
-- `Negotiation.messages` (JSON) + `Negotiation.actions_log` (JSON) are pre-allocated for outreach history + discrete actions
-- `scoring.compute_subjective(cumulative_score, quote_cents, budget_cap_cents, weights)` → quote-aware rank score (quality * w_quality + price_fit * w_price)
-- `scoring.RankingWeights(quality, price)` — two-axis weight profile (sums to 1.0); a `speed` axis lands when vendor-proposed schedules arrive
-- `scoring.default_weights_for(urgency)` — starting profile keyed to `WorkOrder.urgency`. Emergency leans heavily on quality (0.80 / 0.20); flexible leans on price (0.35 / 0.65)
-- `scoring.PRESET_WEIGHTS` — named profiles for the FM-override UI (`balanced`, `quality_leaning`, `price_leaning`, `quality_only`, `price_only`)
+### State machine (`NegotiationState` in `backend/app/enums.py`)
 
-**Planned ranking UX**: once every `prospecting` negotiation moves to `quoted` (has `quote_cents`), subpart 3 computes subjective rank using the work order's default weights and surfaces the ranked list to the facility manager. The UI explains what the ranking is optimizing for ("You asked for it urgent, so I leaned toward quality") and offers one-click re-rank using the `PRESET_WEIGHTS` — no new vendor interaction needed, just a different weights arg passed to `compute_subjective`.
+Nine states. Five active, four terminal (write-once):
+
+```
+PROSPECTING → CONTACTED → NEGOTIATING → QUOTED → SCHEDULED → COMPLETED
+                                         ↓
+                                         DECLINED / NOSHOW / CANCELLED
+```
+
+- `PROSPECTING`: work order just created; Tavi hasn't reached out yet. First tick sends the opening pitch and transitions to `CONTACTED`.
+- `CONTACTED`: pitch sent; awaiting vendor's first reply. Vendor may reply normally, refuse politely (direct state jump to `DECLINED`), or go silent.
+- `NEGOTIATING`: active dialogue. Tavi pushes for firm terms + extracts facts. `record_quote` transitions to `QUOTED`.
+- `QUOTED`: firm price + date on file. Waits silently until `ready_to_schedule` flips; then enters the booking sub-flow (see below).
+- `SCHEDULED`: winner locked in. Awaits operator signal for `COMPLETED` / `NOSHOW` (not yet wired; they're still planned external controls).
+- `COMPLETED` / `NOSHOW` / `DECLINED` / `CANCELLED`: terminal.
+
+### Time as loop iterations
+
+Wall clock is irrelevant in the demo — time is measured in scheduler ticks. `WorkOrder.loop_iteration` bumps on every tick. `negotiation_messages.iteration` records which tick each message was written on, so the UI can render "vendor went cold for 3 ticks" gaps between messages. Timeouts are iteration-denominated:
+
+- `SILENCE_TIMEOUT_TICKS = 3`: vendor silent through the pre-quote funnel → scheduler force-declines.
+- `CONFIRMATION_TIMEOUT_TICKS = 2`: vendor silent after a booking-confirmation request → force-decline, next rank takes over.
+
+### Scheduler top loop (`scheduler.py`)
+
+One public entry: `tick(db, work_order_id)`. Each call:
+
+1. Increments `WorkOrder.loop_iteration` and commits (UI sees it immediately).
+2. Refreshes `subjective_rank_score` + `rank` across every currently-QUOTED neg using `scoring.default_weights_for(urgency)`.
+3. Determines the "active pick" for the booking phase: lowest-rank QUOTED neg when `ready_to_schedule=true`.
+4. Walks every non-filtered active negotiation, dispatches per-state, commits after each (UI streams messages in real time).
+5. Cascade-declines remaining QUOTED peers if anyone hit `SCHEDULED` this tick.
+6. Recomputes `ready_to_schedule` + commits.
+
+### `ready_to_schedule` gate (`readiness.py`)
+
+Monotonic `WorkOrder` flag. Flips `true` the moment every non-filtered negotiation lands in `{QUOTED, SCHEDULED, COMPLETED, NOSHOW, DECLINED, CANCELLED}` — i.e., no one is still actively pre-quote. Checked after every successful coordinator tool call and at end-of-tick. Once true, never flips back (transitions out of the ready-set don't exist in the state machine).
+
+### Agents
+
+**Tavi Coordinator** (`coordinator.py` + `prompts.py` + `tools.py`). Stateless Anthropic call per turn. 8 tools:
+
+| Tool | Effect |
+|------|--------|
+| `send_email` / `send_sms` / `send_phone` | Appends an outbound message; transitions `PROSPECTING → CONTACTED` on first send |
+| `record_quote` | Sets `quoted_price_cents` + `quoted_available_at`; transitions `NEGOTIATING → QUOTED` |
+| `record_facts` | Merges freeform key/values into `Negotiation.attributes` (license_verified, insurance_carrier, etc.) |
+| `close_negotiation` | `CONTACTED` / `NEGOTIATING` → `DECLINED` with a terminal reason (pre-quote walkaway) |
+| `accept_quote` | `QUOTED → SCHEDULED` |
+| `decline_quote` | `QUOTED → DECLINED` |
+
+No `counter_quote`, no `escalate` — v0 runs fully autonomously with no human review path.
+
+**Vendor simulator** (`simulator.py`). Stateless Anthropic call returning one plain-text message. Sees the thread flipped to vendor-perspective, their own persona markdown, the work order, and the channel of Tavi's last message. No tools.
+
+### Vendor personas (`backend/app/personas/pool/`)
+
+8 markdown persona archetypes (`01_ace_premium.md` … `08_family_shop.md`) spanning the trait axes called out in `docs/vendor-simulator.md` — price orientation, negotiability, responsiveness, pickiness, reliability signals, tone. Randomly assigned in `cache.upsert_google` on first vendor cache, then stable across re-discoveries. Full markdown is copied onto `Vendor.persona_markdown`.
+
+Assignment-time also synthesizes a fake contact email (`contact@{slug}.example` on `Vendor.email`) so the email-first channel-selection rule fires in the demo — Google Places doesn't expose contact email.
+
+### Vendor first-reply behaviors
+
+Three mutually exclusive outcomes on the first vendor-turn in CONTACTED (checked in order):
+
+1. **Ghoster** (inverse-weighted to quality; 5–35% band). Vendor never replies. Caches `attributes.is_ghoster=true`; every subsequent tick skips. Silence timeout eventually terminates them.
+2. **Refusal** (positive-weighted to quality; 5–15% band). Vendor posts one polite decline from a 5-message pool; state jumps directly to `DECLINED` with `terminal_reason: "vendor declined the opportunity"`.
+3. **Engage**. Normal dialogue. `attributes.refused=false` cached to prevent re-rolls.
+
+Persona `responsiveness` trait governs the per-tick skip probability on top of ghoster (`prompt`=10%, `terse`=20%, `slow`=60%).
+
+### Sequential booking flow (post-`ready_to_schedule`)
+
+All-vendors-queued, one-at-a-time. The rank-1 QUOTED neg is the "active pick"; every other QUOTED neg is silent until it resolves. On the active pick:
+
+1. **Credential verification** (if `WorkOrder.requires_licensed` / `requires_insured` and the creds aren't on file yet):
+   - `quote_action=verify_credentials` — Tavi asks directly about the missing creds.
+   - Vendor reply → `quote_action=process_verification` — coordinator calls `record_facts` (positive answer), sends a follow-up (ambiguous), or calls `decline_quote` (refused / can't provide).
+   - Silence ≥ `SILENCE_TIMEOUT_TICKS` → scheduler force-declines; next rank takes over.
+2. **Booking confirmation** (once credentials are verified):
+   - `quote_action=request_confirmation` — Tavi asks the vendor to confirm they're locked in at the quoted terms.
+   - Vendor reply → `quote_action=respond_to_confirmation` — coordinator calls `accept_quote` (→ SCHEDULED + cascade-decline peers) or `decline_quote`.
+   - Silence ≥ `CONFIRMATION_TIMEOUT_TICKS` → force-decline; next rank takes over.
+
+### Pitch-template caching (`pitch.py`)
+
+One Anthropic call per work order generates a shared opening pitch with `{{vendor_name}}` placeholder, cached on `WorkOrder.pitch_template` (JSON `{subject, body}`). Every subsequent vendor's PROSPECTING turn skips the coordinator LLM loop, substitutes the vendor name, and dispatches `send_email` directly — ~87% fewer opening Anthropic calls on a 12-vendor run.
+
+### Discovery candidate cap
+
+`MAX_CANDIDATES = 12` in `orchestrator.py` — keeps the auction demoable within a handful of ticks. Google Places allows up to 20 per page; we take the top N by search relevance.
+
+### Command center (`frontend/app/work-orders/[id]/page.tsx`)
+
+Per-work-order screen. Header shows the work order summary, iteration counter, prominent Tick button, and a green "ready to schedule" pill once the flag flips. Kanban by state (5 active columns), concluded bucket collapsible below, excluded-at-discovery bucket below that. Clicking a card opens a thread panel with full message history (rendering "— N ticks of silence —" separators between messages), firm quote, extracted facts.
+
+While the Tick POST is in flight, the UI polls `/negotiations/by_work_order` every 400ms — since the scheduler commits after each per-neg dispatch, messages stream into the board as they're written.
+
+Tick banner summarizes the tick: messages sent, silent, timed out (red), refused (amber), plus callouts for "Verifying credentials → Vendor", "Confirmation request → Vendor", and "Booking confirmed — Vendor".
+
+### Conventions (subpart 3)
+
+- Time is measured in ticks, not seconds; every delay is iteration-denominated.
+- State column is the source of truth — what Tavi says in a message is LLM output; what the kanban shows is the DB.
+- Fully autonomous. No human-in-the-loop approval flow in v0; operator-driven `COMPLETED` / `NOSHOW` / `CANCELLED` buttons are still deferred.
+- Message thread is the shared communication layer between Tavi and the vendor simulator — future email/SMS/phone integrations layer on top of the same table.
 
 ## Admin DB explorer (`frontend/app/admin/page.tsx`)
 
-Read-only surface for inspecting the pipeline end-to-end during the demo. Lists work orders, cached vendors (with cumulative score breakdowns), discovery runs (with audit counts), and negotiations (joined with vendor display name, showing subjective rank breakdown + filter reasons). Backed by `/admin/*` endpoints in `backend/app/routers/admin.py`. Linked from the intake page header and from the post-submit confirmation.
+Read-only surface for inspecting the pipeline end-to-end during the demo. Lists work orders, cached vendors (with cumulative score breakdowns + persona markdown previews), discovery runs (with audit counts), and negotiations (joined with vendor display name, showing subjective rank, filter reasons, quote + availability, extracted attributes, and the full message thread). Backed by `/admin/*` endpoints in `backend/app/routers/admin.py`. Linked from the intake page header and the post-submit confirmation.
+
+The command center at `/work-orders/[id]` is the live, interactive view — admin is for debugging the raw state.
 
 ## Conventions (project-wide)
 
-- Breadth first across all three subparts, then deepen subpart 3
-- Real pipelines, real APIs: subpart 2 runs against live Google Places + BBB, not fixtures
-- Human-in-the-loop: LLM drafts, human approves before any state-changing action
-- One unified thread per engagement across modalities — no per-modality silos in the UI
-- Engagement state machine is the central abstraction; UI surfaces it directly
-- All datetimes in UTC
+- Real pipelines, real APIs: subpart 2 runs against live Google Places + BBB, not fixtures; subpart 3 runs against live Anthropic.
+- State machine is the source of truth. The LLM drafts messages; the DB reflects reality. What the kanban shows is what actually happened.
+- One unified thread per engagement across modalities — no per-modality silos in the UI. Email/SMS/phone tool calls all land in the same `negotiation_messages` table with a `channel` tag.
+- Fully autonomous in v0 — no human-in-the-loop approval. Planned later: operator-driven `COMPLETED` / `NOSHOW` / `CANCELLED` buttons from `SCHEDULED`.
+- Time in subpart 3 is measured in scheduler ticks, not wall-clock seconds.
+- All DB datetimes in UTC.
 
 ## Commands
 
@@ -163,7 +264,7 @@ Read-only surface for inspecting the pipeline end-to-end during the demo. Lists 
 - Initialize SQLite schema: `uv run python create_db.py`
 - Run server: `uv run uvicorn app.main:app --reload --port 8000`
 - Interactive chat REPL (talks to the running server): `uv run python chat.py`
-- Unit tests: `uv run pytest` — covers hours-overlap edge cases (cross-midnight / 24/7 / missing hours), scoring math (Bayesian anchor, urgency weight profiles, BBB-missing reweight), and the BBB HTML parser against inline fixtures
+- Unit tests: `uv run pytest` — ~80 tests across: hours-overlap edge cases (cross-midnight / 24/7 / missing hours), scoring math (Bayesian anchor, urgency weight profiles, BBB-missing reweight, quote-aware subjective ranking), BBB HTML parser fixtures, coordinator tool dispatchers (state guards, attribute merges), pitch-template substitution, and the full scheduler flow (turn resolution, ghoster + refusal rolls, silence/confirmation/verification timeouts, sequential booking flow, cascade decline, readiness monotonicity). Stubs the LLM agents; no Anthropic calls during `pytest`
 
 ### Frontend (`frontend/`)
 

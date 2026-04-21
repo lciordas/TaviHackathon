@@ -2,17 +2,14 @@
 
 Exported Claude Code session transcripts from the build, per the hackathon brief's "please plan to export your prompt history" requirement.
 
-Seven sessions, each in its own folder named after the session's topic. Chronological order (earliest first):
+Four substantive sessions, each in its own folder named after the session's topic. Chronological order (earliest first):
 
 | Folder | When | Topic |
 |---|---|---|
 | `kickoff-and-intake-build/` | Apr 19 | Read the hackathon brief, plan the build, implement intake (chat → structured work order + Google Places autocomplete) |
 | `vendor-discovery-build/` | Apr 19 | Fake-data generation + live Google Places pipeline + BBB enrichment + scoring + filters for subpart 2 |
-| `line-count-check/` | Apr 20 | Quick "how much code have I written so far" sanity check |
-| `logical-commit-and-push/` | Apr 20 | Splitting accumulated changes into logical commits and pushing |
 | `subpart-3-vendor-auction-build/` | Apr 20 | The main engineering session — state machine, scheduler, coordinator + simulator LLM agents, persona pool, command-center UI |
 | `distribution-readme-and-prompts/` | Apr 21 | Packaging the project for distribution — Makefile, README, `.env.example`, this prompt export |
-| `intake-architecture-qa/` | Apr 21 | Deep-dive Q&A on how the intake agent handles required-field tracking |
 
 ## Two formats per session
 

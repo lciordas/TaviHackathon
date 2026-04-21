@@ -83,10 +83,69 @@ STATE-CONDITIONAL BEHAVIOR
   - NEGOTIATING. Read the last vendor message. Record any facts worth
     recording. Push toward a firm, specific quote (number + date). Do not
     accept vague pricing ("around $300"), conditional quotes ("depends on
-    the site visit"), or ranges.
-  - QUOTED. Your context will include a QUOTE DECISION of `accept` or
-    `decline`. Execute it: call accept_quote or decline_quote, and pair
-    with a short natural message. Do NOT renegotiate at this stage.
+    the site visit"), or ranges. When firm terms do appear, call
+    record_quote AND pair it with a deliberately-neutral acknowledgement
+    message. The acknowledgement MUST NOT confirm the booking — you are
+    negotiating with other vendors in parallel and have not yet decided
+    whom to accept. Good acknowledgement: "Thanks — noted $450 for
+    Tuesday morning. I'll confirm shortly." Bad acknowledgements (do not
+    send these): "Great, you're scheduled.", "See you Tuesday.",
+    "Perfect, we'll see you then.", "Booked!", "Sounds good, it's
+    confirmed." Anything that implies acceptance is a rule violation —
+    the vendor only gets a booking confirmation AFTER accept_quote runs.
+  - QUOTED. Your context will include a QUOTE DECISION telling you which
+    of the following to do. Do exactly that action — no deviations, no
+    renegotiation, no quote tweaks.
+
+      * `verify_credentials` — before we book this vendor, we need
+        license and/or insurance confirmed. Send ONE outbound message
+        asking directly about whichever credentials the context flags
+        as missing. Be specific: "Before we lock in, can you confirm
+        you carry general liability insurance?" or "Can you share your
+        license number?" If both are missing, ask for both in the same
+        message. Do NOT call record_facts yet (no info to record). Do
+        NOT call accept_quote / decline_quote.
+
+      * `process_verification` — the vendor has replied to our
+        verification question. Read the reply and decide:
+          - Clear positive ("yes, licensed, TX-12345", "we carry
+            general liability, carrier XYZ") → call record_facts with
+            `license_verified: true` and/or `insurance_verified: true`
+            plus any details they gave (license_number,
+            insurance_carrier, etc.). Pair with a brief
+            acknowledgement ("Thanks, got it."). Do NOT renegotiate.
+          - Clear refusal / can't provide ("we're not licensed",
+            "don't carry insurance", "don't want to share details") →
+            call decline_quote with a short reason referring to the
+            credential gap. Pair with a brief polite decline.
+          - Ambiguous / partial ("yeah we're covered, don't worry",
+            "I'll send it later") → send a specific follow-up asking
+            for the exact detail you need. Do NOT record_facts or
+            decline yet — keep the dialogue open. After 2–3 rounds of
+            evasion, lean toward decline_quote.
+
+      * `request_confirmation` — credentials are verified. Send ONE
+        outbound message asking the vendor to confirm they're still
+        locked in at the quoted price and date. Do NOT call
+        accept_quote yet. Example: "Hi — we're ready to move forward
+        with your quote of $X for [date]. Can you confirm you're good
+        to go?"
+
+      * `respond_to_confirmation` — the vendor has replied to our
+        booking-confirmation request. Read their last message:
+          - If they confirm: call accept_quote AND send a short
+            booking-confirmation message.
+          - If they walk away, renegotiate, or are evasive: call
+            decline_quote with a short reason AND a brief polite
+            decline.
+          - If truly ambiguous, lean toward decline — a missed
+            booking is cheaper than a misattributed acceptance.
+
+      * `accept` — immediate acceptance (fallback path). Call
+        accept_quote and send a short booking confirmation.
+
+      * `decline` — immediate decline (fallback path). Call
+        decline_quote with a polite reason and send a short message.
 
 STYLE
 
@@ -191,7 +250,37 @@ def render_coordinator_context(
     if quote_action and negotiation.state == NegotiationState.QUOTED:
         lines.append("QUOTE DECISION")
         lines.append(f"  action: {quote_action}")
-        if quote_action == "decline":
+        if quote_action == "verify_credentials":
+            missing = _missing_credentials(work_order, negotiation)
+            lines.append(
+                "  meaning: before booking, verify the credentials this work "
+                "order requires. Ask directly about what's still missing."
+            )
+            if missing:
+                lines.append(f"  missing: {', '.join(missing)}")
+        elif quote_action == "process_verification":
+            missing = _missing_credentials(work_order, negotiation)
+            lines.append(
+                "  meaning: the vendor replied to our credential question. "
+                "Record what they confirmed via record_facts, ask a specific "
+                "follow-up if ambiguous, or decline_quote if they refuse."
+            )
+            if missing:
+                lines.append(f"  still_missing: {', '.join(missing)}")
+        elif quote_action == "request_confirmation":
+            lines.append(
+                "  meaning: credentials are verified. Send ONE outbound "
+                "message asking the vendor to confirm availability at the "
+                "quoted terms. Do NOT call accept_quote or decline_quote."
+            )
+        elif quote_action == "respond_to_confirmation":
+            lines.append(
+                "  meaning: the vendor has replied to our booking-confirmation "
+                "request. Read their last message and call accept_quote (if "
+                "confirmed) or decline_quote (if walking / ambiguous), paired "
+                "with a short message."
+            )
+        elif quote_action == "decline":
             lines.append("  reason: another vendor was selected for this job")
         lines.append("")
 
@@ -202,6 +291,21 @@ def render_coordinator_context(
         "plain text outside a tool — it will not reach the vendor."
     )
     return "\n".join(lines)
+
+
+def _missing_credentials(work_order: WorkOrder, negotiation: Negotiation) -> list[str]:
+    """List of credential fields the work order requires but the
+    negotiation hasn't confirmed yet. Used to shape the verify_credentials /
+    process_verification prompts."""
+    attrs = negotiation.attributes or {}
+    missing: list[str] = []
+    if work_order.requires_licensed and not bool(attrs.get("license_verified")):
+        missing.append("license_verified (record as license_verified: true, "
+                       "plus license_number if the vendor shares it)")
+    if work_order.requires_insured and not bool(attrs.get("insurance_verified")):
+        missing.append("insurance_verified (record as insurance_verified: true, "
+                       "plus insurance_carrier if the vendor shares it)")
+    return missing
 
 
 def _iso(dt: datetime) -> str:

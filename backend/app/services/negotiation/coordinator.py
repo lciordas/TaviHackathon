@@ -17,9 +17,10 @@ from anthropic import Anthropic
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from ...enums import NegotiationState
 from ...models import Negotiation, Vendor, WorkOrder
 from ..discovery.scoring import haversine_miles
-from . import messages, tools
+from . import messages, pitch, tools
 from .prompts import (
     COORDINATOR_SYSTEM_PROMPT,
     pick_preferred_channel,
@@ -57,6 +58,15 @@ def run_turn(
       {"message_id": first_outbound_message_id | None, "tool_calls": [names...]}
     """
     preferred = pick_preferred_channel(vendor)
+
+    # PROSPECTING opens with a shared pitch template — one LLM call per work
+    # order, reused across every vendor. Skip the coordinator tool-use loop.
+    if negotiation.state == NegotiationState.PROSPECTING and preferred == "email":
+        return _send_pitch_from_template(
+            db, negotiation=negotiation, work_order=work_order,
+            vendor=vendor, iteration=iteration,
+        )
+
     distance = _distance_miles(work_order, vendor)
     context = render_coordinator_context(
         work_order=work_order,
@@ -67,8 +77,20 @@ def run_turn(
         distance_miles=distance,
     )
 
-    api_messages: list[dict[str, Any]] = [{"role": "user", "content": context}]
-    api_messages.extend(messages.thread_for_coordinator(db, negotiation.id))
+    # Thread first, per-turn context last — the context is the most recent
+    # instruction the model should act on, and the trailing user turn also
+    # satisfies Sonnet's "messages must end with user" constraint when the
+    # thread happens to end with a Tavi (assistant) message.
+    api_messages: list[dict[str, Any]] = messages.thread_for_coordinator(db, negotiation.id)
+    if api_messages and api_messages[-1]["role"] == "user":
+        # Thread ends on a vendor reply. Merge the context onto that final
+        # user turn so we don't have two user turns in a row.
+        api_messages[-1] = {
+            "role": "user",
+            "content": api_messages[-1]["content"] + "\n\n" + context,
+        }
+    else:
+        api_messages.append({"role": "user", "content": context})
 
     tool_calls: list[str] = []
     first_message_id: Optional[str] = None
@@ -128,6 +150,39 @@ def run_turn(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _send_pitch_from_template(
+    db: Session,
+    *,
+    negotiation: Negotiation,
+    work_order: WorkOrder,
+    vendor: Vendor,
+    iteration: int,
+) -> dict[str, Any]:
+    """Fill the work order's pitch template for this vendor and dispatch
+    `send_email` directly — no per-vendor LLM call.
+
+    The template is generated on first use (first PROSPECTING turn for this
+    work order) and cached on `WorkOrder.pitch_template` for every
+    subsequent vendor.
+    """
+    template = pitch.get_or_generate(db, work_order)
+    filled = pitch.fill(template, vendor.display_name or "there")
+
+    outcome = tools.dispatch(
+        db, negotiation=negotiation, iteration=iteration,
+        tool_name="send_email",
+        tool_input={"subject": filled["subject"], "body": filled["body"]},
+    )
+    message_id: Optional[str] = None
+    if outcome.success and outcome.detail:
+        message_id = outcome.detail.get("message_id")
+    else:
+        logger.warning("Pitch dispatch failed on neg %s: %s", negotiation.id, outcome.message)
+
+    db.flush()
+    return {"message_id": message_id, "tool_calls": ["send_email"]}
+
 
 def _text_of(content_blocks: list) -> str:
     parts = []

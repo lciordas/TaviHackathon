@@ -2,14 +2,25 @@
 
 One public entry point: `tick(db, work_order_id)`. Each call:
   1. Increments `WorkOrder.loop_iteration` by one.
-  2. If winner-pick is ready (every non-filtered active negotiation is
-     either QUOTED or terminal, and at least one is QUOTED), computes the
-     per-quote accept/decline decisions and stashes them for this tick.
+  2. Refreshes subjective ranks across every QUOTED/SCHEDULED negotiation so
+     the command center shows a live leaderboard.
   3. Walks every non-filtered active negotiation and resolves whose turn it
-     is per `Step 3.md` → *Whose turn is it?*. Invokes the coordinator or
-     the vendor simulator accordingly. Vendor turns roll against the
-     persona's skip probability before invoking the simulator.
-  4. Commits and returns a TickResult for the command-center UI.
+     is per `Step 3.md` → *Whose turn is it?*:
+       - PROSPECTING / CONTACTED / NEGOTIATING are the pre-quote funnel.
+         Vendor-silence timeout (SILENCE_TIMEOUT_TICKS) force-declines any
+         negotiation where it's the vendor's turn and they've stayed silent.
+       - QUOTED splits by `WorkOrder.ready_to_schedule`:
+           * not ready → silent (waiting for peers to catch up)
+           * ready     → the lowest-rank QUOTED neg is the "active pick".
+                         First the coordinator sends a booking confirmation
+                         request; then we wait for the vendor to reply (up
+                         to CONFIRMATION_TIMEOUT_TICKS) and let the
+                         coordinator accept/decline on the reply. Timeouts
+                         force-decline so the next rank can become the pick.
+       - SCHEDULED / terminal — skipped.
+  4. If any QUOTED neg transitioned to SCHEDULED this tick, the remaining
+     QUOTED peers get force-declined as "another vendor was booked".
+  5. Commits and returns a TickResult for the command-center UI.
 """
 from __future__ import annotations
 
@@ -23,6 +34,7 @@ from sqlalchemy.orm import Session
 from ...enums import (
     ACTIVE_STATES,
     TERMINAL_STATES,
+    MessageChannel,
     MessageSender,
     NegotiationState,
 )
@@ -30,9 +42,41 @@ from ...models import Negotiation, Vendor, WorkOrder
 from ..discovery import scoring
 from ..personas import skip_probability_for
 from . import coordinator, messages, simulator
+from .readiness import refresh_ready_to_schedule
 
 
 logger = logging.getLogger(__name__)
+
+
+# Scheduler-driven termination thresholds (see docs/Step 3.md → top loop).
+SILENCE_TIMEOUT_TICKS = 3        # vendor silent during pre-quote negotiation
+CONFIRMATION_TIMEOUT_TICKS = 2   # vendor silent after a booking-confirmation request
+
+
+# Ghoster probability: some vendors never reply to the initial Tavi pitch.
+# Weighted inversely against vendor quality — a perfect-score vendor is
+# rarely a ghoster; a 0-score vendor ghosts often. Applies once per (work
+# order × vendor) at the CONTACTED state's first vendor turn; the result is
+# persisted on `Negotiation.attributes.is_ghoster` so the roll is stable.
+GHOST_PROB_MAX = 0.35  # applied at cumulative_score = 0
+GHOST_PROB_MIN = 0.05  # applied at cumulative_score = 1
+
+# Refusal probability: a slim chance the vendor politely declines the
+# opportunity outright. Weighted POSITIVELY to quality — higher-ranked shops
+# are in higher demand and turn work down more often. Rolled once on the
+# first vendor turn in CONTACTED (after the ghoster check) and persisted as
+# `Negotiation.attributes.refused` to avoid re-rolling.
+REFUSE_PROB_MIN = 0.05  # applied at cumulative_score = 0
+REFUSE_PROB_MAX = 0.15  # applied at cumulative_score = 1
+
+
+REFUSAL_MESSAGES: tuple[str, ...] = (
+    "Appreciate the outreach, but we're not taking on new work right now.",
+    "Thanks for reaching out — unfortunately this isn't a fit for us.",
+    "We're booked solid for the next few weeks, so we'll have to pass on this one.",
+    "Thanks, but our schedule is full through that window — can't commit.",
+    "Appreciate it, but we'll have to pass on this job.",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -46,8 +90,8 @@ class NegotiationEvent:
     vendor_display_name: Optional[str]
     state_before: str
     state_after: str
-    actor: str           # "tavi" | "vendor" | "none"
-    outcome: str         # "message_sent" | "skipped" | "waiting" | "terminal" | "already_scheduled"
+    actor: str           # "tavi" | "vendor" | "system" | "none"
+    outcome: str         # see STATE_OUTCOMES below
     message_id: Optional[str] = None
     detail: Optional[dict] = None
 
@@ -80,14 +124,24 @@ def tick(db: Session, work_order_id: str) -> TickResult:
 
     wo.loop_iteration = (wo.loop_iteration or 0) + 1
     iteration = wo.loop_iteration
+    # Commit the iteration bump immediately so the command center (polling
+    # while the tick runs) can show "iteration N" before the per-neg work
+    # starts streaming in.
+    db.commit()
 
     negs_all = _negotiations_for(db, work_order_id)
     negs = [n for n in negs_all if not n.filtered]
     vendors_by_id = _vendors_by_id(db, [n.vendor_place_id for n in negs])
 
-    # Winner-pick: compute once at the top of the tick so QUOTED rows get a
-    # quote_action injected into the coordinator's context on this same pass.
-    quote_actions, winner_pick = _maybe_winner_pick(db, wo, negs, vendors_by_id)
+    # Refresh subjective ranks across every currently-quoted neg so the
+    # command center shows a live leaderboard as quotes come in. Idempotent.
+    _refresh_quoted_ranks(db, wo, negs, vendors_by_id)
+    db.commit()
+
+    # Identify the "active pick" for the booking-confirmation flow: the
+    # lowest-rank QUOTED neg. Only meaningful when ready_to_schedule is True;
+    # every other QUOTED neg stays silent until this one resolves.
+    active_pick_id = _active_pick_id(wo, negs) if wo.ready_to_schedule else None
 
     events: list[NegotiationEvent] = []
 
@@ -104,12 +158,27 @@ def tick(db: Session, work_order_id: str) -> TickResult:
             negotiation=neg,
             vendor=vendor,
             iteration=iteration,
-            quote_action=quote_actions.get(neg.id),
+            active_pick_id=active_pick_id,
         )
         event.state_before = state_before.value
         event.state_after = neg.state.value
         event.vendor_display_name = vendor.display_name
         events.append(event)
+
+        # Commit after each negotiation's dispatch so a polling UI (command
+        # center) sees each message the moment it's written — not all at
+        # once when the full tick completes. For an 8-vendor work order
+        # with LLM-backed agents, this turns a ~15s blank wait into a
+        # stream of updates.
+        db.commit()
+
+    # If anyone became SCHEDULED this tick, the auction is over — decline the
+    # remaining QUOTED peers. Safe to run every tick (idempotent).
+    _cascade_decline_on_scheduled(negs)
+
+    # End-of-tick sweep: recompute the readiness flag. Redundant with the
+    # per-tool-call check but catches direct state mutations (timeouts).
+    refresh_ready_to_schedule(db, work_order_id)
 
     db.commit()
 
@@ -117,7 +186,7 @@ def tick(db: Session, work_order_id: str) -> TickResult:
         work_order_id=work_order_id,
         iteration=iteration,
         events=events,
-        winner_pick=winner_pick,
+        winner_pick=None,  # legacy field — superseded by the live rank + booking flow
     )
 
 
@@ -132,7 +201,7 @@ def _run_one(
     negotiation: Negotiation,
     vendor: Vendor,
     iteration: int,
-    quote_action: Optional[str],
+    active_pick_id: Optional[str],
 ) -> NegotiationEvent:
     state = negotiation.state
 
@@ -156,24 +225,10 @@ def _run_one(
         return base
 
     if state == NegotiationState.QUOTED:
-        # Coordinator acts only when winner-pick has decided something for
-        # this neg; otherwise we wait for peer negotiations to reach QUOTED.
-        if quote_action is None:
-            base.outcome = "waiting"
-            return base
-        result = coordinator.run_turn(
-            db,
-            negotiation=negotiation,
-            work_order=work_order,
-            vendor=vendor,
-            iteration=iteration,
-            quote_action=quote_action,
+        return _run_quoted(
+            db, work_order=work_order, negotiation=negotiation, vendor=vendor,
+            iteration=iteration, active_pick_id=active_pick_id, base=base,
         )
-        base.actor = "tavi"
-        base.outcome = "message_sent"
-        base.message_id = result["message_id"]
-        base.detail = {"quote_action": quote_action}
-        return base
 
     if state == NegotiationState.PROSPECTING:
         result = coordinator.run_turn(
@@ -188,95 +243,422 @@ def _run_one(
         base.message_id = result["message_id"]
         return base
 
-    if state == NegotiationState.CONTACTED:
-        # Vendor's first reply. Roll skip.
-        if _vendor_skips(vendor):
-            base.actor = "vendor"
-            base.outcome = "skipped"
-            return base
-        result = simulator.run_turn(
-            db,
-            negotiation=negotiation,
-            work_order=work_order,
-            vendor=vendor,
-            iteration=iteration,
+    if state in (NegotiationState.CONTACTED, NegotiationState.NEGOTIATING):
+        return _run_pre_quote(
+            db, work_order=work_order, negotiation=negotiation, vendor=vendor,
+            iteration=iteration, base=base,
         )
-        base.actor = "vendor"
-        base.outcome = "message_sent"
-        base.message_id = result["message_id"]
-        return base
 
-    if state == NegotiationState.NEGOTIATING:
-        last = messages.last_message(db, negotiation.id)
-        # NEGOTIATING with no messages is an invariant violation per spec;
-        # treat it as the coordinator's turn so the flow self-heals.
-        last_sender = last.sender if last is not None else MessageSender.VENDOR
-        if last_sender == MessageSender.VENDOR:
-            result = coordinator.run_turn(
-                db,
-                negotiation=negotiation,
-                work_order=work_order,
-                vendor=vendor,
-                iteration=iteration,
-            )
-            base.actor = "tavi"
-            base.outcome = "message_sent"
-            base.message_id = result["message_id"]
-            return base
-        # Last was TAVI — vendor's turn.
-        if _vendor_skips(vendor):
-            base.actor = "vendor"
-            base.outcome = "skipped"
-            return base
-        result = simulator.run_turn(
-            db,
-            negotiation=negotiation,
-            work_order=work_order,
-            vendor=vendor,
-            iteration=iteration,
-        )
-        base.actor = "vendor"
-        base.outcome = "message_sent"
-        base.message_id = result["message_id"]
-        return base
-
-    # Defensive default.
     return base
 
 
-def _vendor_skips(vendor: Vendor) -> bool:
+def _run_pre_quote(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    negotiation: Negotiation,
+    vendor: Vendor,
+    iteration: int,
+    base: NegotiationEvent,
+) -> NegotiationEvent:
+    """CONTACTED / NEGOTIATING handling.
+
+    Whose turn: CONTACTED → vendor (first reply). NEGOTIATING → whoever
+    didn't send the last message. Vendor-silence timeout applies in both
+    cases when it's the vendor's turn.
+    """
+    last = messages.last_message(db, negotiation.id)
+    last_sender = last.sender if last is not None else MessageSender.VENDOR
+
+    # CONTACTED always means "waiting for vendor's first reply". For
+    # NEGOTIATING, vendor's turn iff the last message was from Tavi.
+    vendors_turn = (
+        negotiation.state == NegotiationState.CONTACTED
+        or last_sender == MessageSender.TAVI
+    )
+
+    if vendors_turn:
+        # Check silence timeout first.
+        if last is not None and last.sender == MessageSender.TAVI:
+            iters_since = iteration - last.iteration
+            if iters_since >= SILENCE_TIMEOUT_TICKS:
+                _force_decline(
+                    negotiation,
+                    reason=f"no response within {iters_since} ticks",
+                )
+                base.actor = "system"
+                base.outcome = "silence_timeout"
+                base.detail = {"ticks_since_last_tavi": iters_since}
+                return base
+
+        # Vendor's turn, within the window. Roll skip (ghoster + persona).
+        if _vendor_skips(negotiation, vendor):
+            base.actor = "vendor"
+            base.outcome = "skipped"
+            return base
+
+        # Refusal — only at first reply (CONTACTED). Vendor posts one polite
+        # decline message and the negotiation terminates immediately.
+        refusal = _roll_refusal(negotiation, vendor)
+        if refusal is not None:
+            msg = messages.append_message(
+                db, negotiation,
+                sender=MessageSender.VENDOR, channel=MessageChannel.EMAIL,
+                iteration=iteration, content={"text": refusal},
+            )
+            _force_decline(negotiation, reason="vendor declined the opportunity")
+            base.actor = "vendor"
+            base.outcome = "refused"
+            base.message_id = msg.id
+            return base
+
+        result = simulator.run_turn(
+            db, negotiation=negotiation, work_order=work_order,
+            vendor=vendor, iteration=iteration,
+        )
+        base.actor = "vendor"
+        base.outcome = "message_sent"
+        base.message_id = result["message_id"]
+        return base
+
+    # Tavi's turn (NEGOTIATING with last vendor reply).
+    result = coordinator.run_turn(
+        db, negotiation=negotiation, work_order=work_order,
+        vendor=vendor, iteration=iteration,
+    )
+    base.actor = "tavi"
+    base.outcome = "message_sent"
+    base.message_id = result["message_id"]
+    return base
+
+
+def _run_quoted(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    negotiation: Negotiation,
+    vendor: Vendor,
+    iteration: int,
+    active_pick_id: Optional[str],
+    base: NegotiationEvent,
+) -> NegotiationEvent:
+    """QUOTED handling — sequential credential-verify + booking-confirm flow.
+
+    Pre-ready (`WorkOrder.ready_to_schedule=false`): silent. Wait for peers
+    to catch up or terminate.
+
+    Post-ready, only the "active pick" (lowest-rank QUOTED neg) moves each
+    tick. Others stay queued. The active pick runs through two sub-phases:
+
+      1. Credential verification. If the work order requires licensed /
+         insured and those facts aren't on the negotiation yet, Tavi
+         conducts a focused Q&A until insurance_verified / license_verified
+         are recorded (or the vendor refuses → decline_quote, or times out
+         on silence).
+      2. Booking confirmation. Same as before — request, vendor reply,
+         accept_quote / decline_quote.
+    """
+    if not work_order.ready_to_schedule:
+        base.outcome = "waiting"
+        return base
+
+    if active_pick_id is None or negotiation.id != active_pick_id:
+        # Post-ready but we're not the current pick — queued behind a
+        # higher-ranked vendor going through verification / confirmation.
+        base.outcome = "queued"
+        return base
+
+    # Gate: credentials first, booking confirmation second.
+    if not _credentials_verified(work_order, negotiation):
+        return _run_verification(
+            db, work_order=work_order, negotiation=negotiation,
+            vendor=vendor, iteration=iteration, base=base,
+        )
+
+    attrs = dict(negotiation.attributes or {})
+    sent_at = attrs.get("booking_confirmation_requested_at_iteration")
+
+    if sent_at is None:
+        # First time selected. Coordinator sends the booking confirmation.
+        result = coordinator.run_turn(
+            db, negotiation=negotiation, work_order=work_order,
+            vendor=vendor, iteration=iteration,
+            quote_action="request_confirmation",
+        )
+        attrs["booking_confirmation_requested_at_iteration"] = iteration
+        negotiation.attributes = attrs
+        db.flush()
+        base.actor = "tavi"
+        base.outcome = "confirmation_requested"
+        base.message_id = result["message_id"]
+        base.detail = {"quote_action": "request_confirmation"}
+        return base
+
+    # Already requested. Has the vendor replied since?
+    last = messages.last_message(db, negotiation.id)
+    if last is not None and last.sender == MessageSender.VENDOR and last.iteration > sent_at:
+        # Vendor replied. Coordinator decides accept vs decline.
+        result = coordinator.run_turn(
+            db, negotiation=negotiation, work_order=work_order,
+            vendor=vendor, iteration=iteration,
+            quote_action="respond_to_confirmation",
+        )
+        base.actor = "tavi"
+        base.outcome = "confirmation_handled"
+        base.message_id = result["message_id"]
+        base.detail = {"quote_action": "respond_to_confirmation"}
+        return base
+
+    # No vendor response yet — check timeout.
+    iters_waiting = iteration - sent_at
+    if iters_waiting >= CONFIRMATION_TIMEOUT_TICKS:
+        _force_decline(
+            negotiation,
+            reason=f"no response to booking confirmation within {iters_waiting} ticks",
+        )
+        base.actor = "system"
+        base.outcome = "confirmation_timeout"
+        base.detail = {"ticks_waiting": iters_waiting}
+        return base
+
+    # Still within window. Vendor's turn.
+    if _vendor_skips(negotiation, vendor):
+        base.actor = "vendor"
+        base.outcome = "skipped"
+        return base
+    result = simulator.run_turn(
+        db, negotiation=negotiation, work_order=work_order,
+        vendor=vendor, iteration=iteration,
+    )
+    base.actor = "vendor"
+    base.outcome = "message_sent"
+    base.message_id = result["message_id"]
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Credential verification sub-phase (runs on the active pick before booking)
+# ---------------------------------------------------------------------------
+
+def _credentials_verified(work_order: WorkOrder, negotiation: Negotiation) -> bool:
+    """True when every credential the work order requires has been recorded
+    positively on the negotiation's attributes bag.
+
+    If the work order doesn't require either credential, this returns True
+    immediately — verification phase is skipped.
+    """
+    attrs = negotiation.attributes or {}
+    if work_order.requires_licensed and not bool(attrs.get("license_verified")):
+        return False
+    if work_order.requires_insured and not bool(attrs.get("insurance_verified")):
+        return False
+    return True
+
+
+def _run_verification(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    negotiation: Negotiation,
+    vendor: Vendor,
+    iteration: int,
+    base: NegotiationEvent,
+) -> NegotiationEvent:
+    """Conduct credential verification with the active pick.
+
+    Flow mirrors the booking-confirmation flow but with different prompts:
+      - First pass: send the verification request (`quote_action=verify_credentials`).
+      - Vendor reply → Tavi processes (`quote_action=process_verification`):
+        may call record_facts (positive answer), send a follow-up (ambiguous),
+        or decline_quote (vendor refused / can't provide).
+      - Silence ≥ SILENCE_TIMEOUT_TICKS → force-decline.
+      - Vendor skip / simulator invocation while within the window.
+    """
+    attrs = dict(negotiation.attributes or {})
+    started_at = attrs.get("verification_started_at_iteration")
+
+    if started_at is None:
+        # First turn of verification. Coordinator asks.
+        result = coordinator.run_turn(
+            db, negotiation=negotiation, work_order=work_order,
+            vendor=vendor, iteration=iteration,
+            quote_action="verify_credentials",
+        )
+        attrs["verification_started_at_iteration"] = iteration
+        negotiation.attributes = attrs
+        db.flush()
+        base.actor = "tavi"
+        base.outcome = "verification_requested"
+        base.message_id = result["message_id"]
+        base.detail = {"quote_action": "verify_credentials"}
+        return base
+
+    # In progress. Whose turn is it?
+    last = messages.last_message(db, negotiation.id)
+
+    if last is not None and last.sender == MessageSender.VENDOR:
+        # Vendor replied — Tavi processes. Coordinator may record_facts,
+        # send a follow-up, or decline_quote based on the reply content.
+        result = coordinator.run_turn(
+            db, negotiation=negotiation, work_order=work_order,
+            vendor=vendor, iteration=iteration,
+            quote_action="process_verification",
+        )
+        base.actor = "tavi"
+        base.outcome = "verification_progress"
+        base.message_id = result["message_id"]
+        base.detail = {"quote_action": "process_verification"}
+        return base
+
+    # Last message was Tavi — vendor's turn.
+    if last is not None:
+        iters_since = iteration - last.iteration
+        if iters_since >= SILENCE_TIMEOUT_TICKS:
+            _force_decline(
+                negotiation,
+                reason=f"no response during credential verification within {iters_since} ticks",
+            )
+            base.actor = "system"
+            base.outcome = "verification_timeout"
+            base.detail = {"ticks_since_last_tavi": iters_since}
+            return base
+
+    # Vendor's turn, within the window.
+    if _vendor_skips(negotiation, vendor):
+        base.actor = "vendor"
+        base.outcome = "skipped"
+        return base
+    result = simulator.run_turn(
+        db, negotiation=negotiation, work_order=work_order,
+        vendor=vendor, iteration=iteration,
+    )
+    base.actor = "vendor"
+    base.outcome = "message_sent"
+    base.message_id = result["message_id"]
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _vendor_skips(negotiation: Negotiation, vendor: Vendor) -> bool:
+    """Roll whether the vendor sits out this tick.
+
+    Two cases:
+      - If this vendor has been (or is now) flagged as a ghoster, they
+        always skip — until the silence timeout force-declines them.
+      - Otherwise, roll the persona's normal responsiveness skip probability.
+
+    The ghoster decision is made once at the CONTACTED state's first vendor
+    turn and persisted on `attributes.is_ghoster` so the behavior is stable
+    across ticks (and survives backend reloads).
+    """
+    if _roll_or_read_ghoster(negotiation, vendor):
+        return True
     return random.random() < skip_probability_for(vendor.persona_markdown)
 
 
-# ---------------------------------------------------------------------------
-# Winner-pick
-# ---------------------------------------------------------------------------
+def _roll_or_read_ghoster(negotiation: Negotiation, vendor: Vendor) -> bool:
+    """Return True iff this negotiation's vendor is a ghoster. Decides on
+    first call for CONTACTED-state negotiations and caches the result."""
+    attrs = dict(negotiation.attributes or {})
+    if "is_ghoster" in attrs:
+        return bool(attrs["is_ghoster"])
+    # Decide only for the initial-reply case. After CONTACTED, vendors that
+    # have responded at least once aren't ghosters by definition.
+    if negotiation.state != NegotiationState.CONTACTED:
+        return False
+    quality = max(0.0, min(1.0, vendor.cumulative_score or 0.0))
+    ghost_prob = GHOST_PROB_MAX - (GHOST_PROB_MAX - GHOST_PROB_MIN) * quality
+    is_ghost = random.random() < ghost_prob
+    attrs["is_ghoster"] = is_ghost
+    negotiation.attributes = attrs
+    return is_ghost
 
-def _maybe_winner_pick(
+
+def _roll_refusal(negotiation: Negotiation, vendor: Vendor) -> Optional[str]:
+    """Return a refusal message if this vendor declines the opportunity, or
+    None otherwise. Decides once on the first CONTACTED-state turn where
+    the vendor would have spoken (i.e., after ghoster/persona-skip checks).
+
+    Cached on `attributes.refused` (bool) so subsequent calls short-circuit.
+    """
+    attrs = dict(negotiation.attributes or {})
+    if "refused" in attrs:
+        # Once decided, never re-roll. `True` here doesn't mean the message
+        # is still pending — it means they've already refused (and state
+        # should already be DECLINED).
+        return None
+    if negotiation.state != NegotiationState.CONTACTED:
+        return None
+
+    quality = max(0.0, min(1.0, vendor.cumulative_score or 0.0))
+    refuse_prob = REFUSE_PROB_MIN + (REFUSE_PROB_MAX - REFUSE_PROB_MIN) * quality
+    if random.random() < refuse_prob:
+        attrs["refused"] = True
+        negotiation.attributes = attrs
+        return random.choice(REFUSAL_MESSAGES)
+
+    attrs["refused"] = False
+    negotiation.attributes = attrs
+    return None
+
+
+def _force_decline(negotiation: Negotiation, *, reason: str) -> None:
+    """Scheduler-driven termination (timeouts). Bypasses the agent tool path."""
+    attrs = dict(negotiation.attributes or {})
+    attrs["terminal_reason"] = reason
+    negotiation.attributes = attrs
+    negotiation.state = NegotiationState.DECLINED
+
+
+def _active_pick_id(work_order: WorkOrder, negotiations: list[Negotiation]) -> Optional[str]:
+    """Lowest-rank QUOTED neg — the one currently going through booking
+    confirmation. None if no QUOTED neg with a rank exists."""
+    candidates = [
+        n for n in negotiations
+        if n.state == NegotiationState.QUOTED and n.rank is not None
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda n: n.rank or 99999)
+    return candidates[0].id
+
+
+def _cascade_decline_on_scheduled(negotiations: list[Negotiation]) -> None:
+    """If any neg is SCHEDULED, auto-decline remaining QUOTED peers.
+
+    Idempotent: if there's no SCHEDULED neg, no-op. If there are no QUOTED
+    negs left, no-op. Call at end of each tick.
+    """
+    if not any(n.state == NegotiationState.SCHEDULED for n in negotiations):
+        return
+    for n in negotiations:
+        if n.state == NegotiationState.QUOTED:
+            _force_decline(n, reason="another vendor was booked")
+
+
+def _refresh_quoted_ranks(
     db: Session,
     work_order: WorkOrder,
     negotiations: list[Negotiation],
     vendors_by_id: dict[str, Vendor],
-) -> tuple[dict[str, str], Optional[WinnerPickResult]]:
-    """If every active non-filtered negotiation has quoted or terminated and
-    at least one is in QUOTED, compute the accept/decline decisions.
+) -> None:
+    """Recompute subjective_rank_score + rank across QUOTED/SCHEDULED negs.
 
-    Returns (quote_actions, winner_pick). `quote_actions` maps negotiation_id
-    → "accept" | "decline" for consumption by the coordinator on this tick.
+    Runs at the top of every tick so the command center can show a live
+    leaderboard as vendors quote in. Uses urgency-default weights; future
+    work (FM re-rank) would feed a different RankingWeights here.
     """
-    active = [n for n in negotiations if n.state in ACTIVE_STATES]
-    quoted = [n for n in active if n.state == NegotiationState.QUOTED]
-    still_open = [n for n in active if n.state not in (NegotiationState.QUOTED, NegotiationState.SCHEDULED)]
-
-    if not quoted:
-        return {}, None
-    if still_open:
-        return {}, None  # wait for stragglers to quote or terminate
-
-    # Rank by subjective score under the work order's urgency-default weights.
     weights = scoring.default_weights_for(work_order.urgency)
-    ranked_rows: list[tuple[Negotiation, float]] = []
-    for neg in quoted:
+    relevant = [
+        n for n in negotiations
+        if n.state in (NegotiationState.QUOTED, NegotiationState.SCHEDULED)
+        and n.quoted_price_cents is not None
+    ]
+
+    for neg in relevant:
         vendor = vendors_by_id.get(neg.vendor_place_id)
         if vendor is None:
             continue
@@ -288,27 +670,13 @@ def _maybe_winner_pick(
         )
         neg.subjective_rank_score = result.score
         neg.subjective_rank_breakdown = result.breakdown
-        ranked_rows.append((neg, result.score))
 
-    ranked_rows.sort(key=lambda x: x[1], reverse=True)
-
-    quote_actions: dict[str, str] = {}
-    picked: list[dict] = []
-    for rank_idx, (neg, score) in enumerate(ranked_rows, start=1):
-        neg.rank = rank_idx
-        action = "accept" if rank_idx == 1 else "decline"
-        quote_actions[neg.id] = action
-        vendor = vendors_by_id.get(neg.vendor_place_id)
-        picked.append({
-            "negotiation_id": neg.id,
-            "vendor_display_name": vendor.display_name if vendor else None,
-            "rank": rank_idx,
-            "score": score,
-            "action": action,
-        })
+    # Rank 1 = highest score. Stable sort on id for deterministic ties.
+    relevant.sort(key=lambda n: (-(n.subjective_rank_score or 0.0), n.id))
+    for idx, neg in enumerate(relevant, start=1):
+        neg.rank = idx
 
     db.flush()
-    return quote_actions, WinnerPickResult(ranked=picked)
 
 
 # ---------------------------------------------------------------------------

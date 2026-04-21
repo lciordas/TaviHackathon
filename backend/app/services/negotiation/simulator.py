@@ -62,17 +62,18 @@ def run_turn(
         distance_miles=_distance_miles(work_order, vendor),
     )
 
-    api_messages: list[dict[str, Any]] = [{"role": "user", "content": context}]
-    api_messages.extend(messages.thread_for_simulator(db, negotiation.id))
-    # The LLM needs an explicit nudge to produce output, since the prior
-    # user turn is the *context*, not the latest message. The vendor-
-    # perspective thread already ends with a Tavi turn (user role) when
-    # there's history — so if it's non-empty, we skip the nudge.
-    if len(api_messages) == 1:
-        # No thread yet — shouldn't happen in practice because the scheduler
-        # only invokes the simulator when CONTACTED (after Tavi sent first).
-        # Guard anyway.
-        api_messages.append({"role": "user", "content": "(No prior messages — reply to the context above.)"})
+    # Thread first (in vendor perspective), context merged onto the final
+    # user turn. Putting context at the start would create back-to-back user
+    # turns on the very first reply (thread = [user: tavi pitch], context =
+    # [user: persona + wo]), which Sonnet rejects.
+    api_messages: list[dict[str, Any]] = messages.thread_for_simulator(db, negotiation.id)
+    if api_messages and api_messages[-1]["role"] == "user":
+        api_messages[-1] = {
+            "role": "user",
+            "content": api_messages[-1]["content"] + "\n\n" + context,
+        }
+    else:
+        api_messages.append({"role": "user", "content": context})
 
     resp = _anthropic().messages.create(
         model=settings.anthropic_model,

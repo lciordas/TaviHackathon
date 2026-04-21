@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ...enums import MessageChannel, MessageSender, NegotiationState
 from ...models import Negotiation
 from . import messages
+from .readiness import refresh_ready_to_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -199,33 +200,40 @@ def dispatch(
 
     try:
         if tool_name == "send_email":
-            return _send(db, negotiation, iteration, MessageChannel.EMAIL, {
+            outcome = _send(db, negotiation, iteration, MessageChannel.EMAIL, {
                 "text": tool_input.get("body", ""),
                 "subject": tool_input.get("subject", ""),
             })
-        if tool_name == "send_sms":
-            return _send(db, negotiation, iteration, MessageChannel.SMS, {
+        elif tool_name == "send_sms":
+            outcome = _send(db, negotiation, iteration, MessageChannel.SMS, {
                 "text": tool_input.get("text", ""),
             })
-        if tool_name == "send_phone":
-            return _send(db, negotiation, iteration, MessageChannel.PHONE, {
+        elif tool_name == "send_phone":
+            outcome = _send(db, negotiation, iteration, MessageChannel.PHONE, {
                 "text": tool_input.get("script", ""),
             })
-        if tool_name == "record_quote":
-            return _record_quote(negotiation, tool_input)
-        if tool_name == "record_facts":
-            return _record_facts(negotiation, tool_input)
-        if tool_name == "close_negotiation":
-            return _close_negotiation(negotiation, tool_input)
-        if tool_name == "accept_quote":
-            return _accept_quote(negotiation)
-        if tool_name == "decline_quote":
-            return _decline_quote(negotiation, tool_input)
+        elif tool_name == "record_quote":
+            outcome = _record_quote(negotiation, tool_input)
+        elif tool_name == "record_facts":
+            outcome = _record_facts(negotiation, tool_input)
+        elif tool_name == "close_negotiation":
+            outcome = _close_negotiation(negotiation, tool_input)
+        elif tool_name == "accept_quote":
+            outcome = _accept_quote(negotiation)
+        elif tool_name == "decline_quote":
+            outcome = _decline_quote(negotiation, tool_input)
+        else:
+            return ToolOutcome(tool_name, False, "unhandled")
     except Exception as e:
         logger.exception("Tool %s failed on neg %s", tool_name, negotiation.id)
         return ToolOutcome(tool_name, False, f"exception: {e}")
 
-    return ToolOutcome(tool_name, False, "unhandled")
+    # Every successful tool call gets a readiness recompute. The helper is
+    # monotonic + cheap (one query), so calling it from tools that can't
+    # change state (record_facts, send_*) is a harmless no-op.
+    if outcome.success:
+        refresh_ready_to_schedule(db, negotiation.work_order_id)
+    return outcome
 
 
 # ---------------------------------------------------------------------------

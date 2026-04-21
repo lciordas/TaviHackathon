@@ -29,7 +29,7 @@ CACHED_RUN_WINDOW = timedelta(hours=24)
 # Keep the vendor pool small enough that the full negotiation auction stays
 # demoable within a handful of ticks. Google's Places API allows up to 20 per
 # page; we just take the top N by search relevance.
-MAX_CANDIDATES = 8
+MAX_CANDIDATES = 12
 
 
 class DiscoveryError(RuntimeError):

@@ -20,7 +20,7 @@ One repo, one project, three subparts — each developed in its own Claude Code 
 - Backend: FastAPI (Python, `uv` for deps)
 - Frontend: Next.js 16 / React 19 / TypeScript / Tailwind v4
 - DB: SQLite via SQLAlchemy (swap-ready to Postgres; their internal stack is Postgres)
-- LLM: Anthropic Claude via `anthropic` SDK (model: `claude-haiku-4-5-20251001` by default)
+- LLM: Anthropic Claude via `anthropic` SDK (model: `claude-sonnet-4-6` by default)
 - External APIs:
   - **Google Places API (new)** — address autocomplete (intake) + nearby/text search + place details (discovery). Requires `GOOGLE_PLACES_API_KEY`.
   - **BBB (bbb.org)** — scraped via `httpx` + `beautifulsoup4` for grade, accreditation, complaint counts, years-in-business.
@@ -175,7 +175,7 @@ Read-only surface for inspecting the pipeline end-to-end during the demo. Lists 
 ### Environment (`backend/.env`)
 
 - `ANTHROPIC_API_KEY` — required
-- `ANTHROPIC_MODEL` — defaults to `claude-haiku-4-5-20251001`
+- `ANTHROPIC_MODEL` — defaults to `claude-sonnet-4-6`
 - `CORS_ORIGINS` — JSON array, defaults to `["http://localhost:3000"]`
 - `GOOGLE_PLACES_API_KEY` — required for `/intake/places/*` and `/discovery/run`
 - `GOOGLE_PLACES_DEFAULT_RADIUS_M` — defaults to 32186 (~20mi)

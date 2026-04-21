@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: str
-    anthropic_model: str = "claude-haiku-4-5-20251001"
+    anthropic_model: str = "claude-sonnet-4-6"
     cors_origins: list[str] = ["http://localhost:3000"]
 
     google_places_api_key: str | None = None

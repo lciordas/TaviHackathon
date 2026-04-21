@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 CACHED_RUN_WINDOW = timedelta(hours=24)
 
+# Keep the vendor pool small enough that the full negotiation auction stays
+# demoable within a handful of ticks. Google's Places API allows up to 20 per
+# page; we just take the top N by search relevance.
+MAX_CANDIDATES = 8
+
 
 class DiscoveryError(RuntimeError):
     pass
@@ -88,7 +93,7 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
                 lng=work_order.lng,
                 radius_m=radius_m,
                 included_types=spec.included_types,
-                max_results=20,
+                max_results=MAX_CANDIDATES,
             )
         else:  # searchText
             text_q = f"{spec.text_query} near {work_order.city or ''}".strip()
@@ -97,7 +102,7 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
                 lat=work_order.lat,
                 lng=work_order.lng,
                 radius_m=radius_m,
-                max_results=20,
+                max_results=MAX_CANDIDATES,
                 ids_only=True,
             )
             candidate_ids = [r["id"] for r in results]
@@ -124,14 +129,22 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
         db.flush()
 
         # 4. Refetch cached vendor rows now that we've upserted.
-        vendors = cache.get_vendors(db, candidate_ids)
+        all_vendors = cache.get_vendors(db, candidate_ids)
 
-        # 5. Post-filter by trade keyword if the trade spec requires it.
+        # 5. Split by trade-name keyword filter. Name-filtered vendors still
+        #    get a Negotiation row (marked filtered=True) so the admin + command
+        #    center can show why they were excluded — but they skip BBB
+        #    enrichment since they're not real candidates for this trade.
         if spec.name_keywords:
-            vendors = {pid: v for pid, v in vendors.items()
+            vendors = {pid: v for pid, v in all_vendors.items()
                        if name_matches_keywords(v.display_name, spec.name_keywords)}
+            name_filtered = {pid: v for pid, v in all_vendors.items()
+                             if pid not in vendors}
+        else:
+            vendors = all_vendors
+            name_filtered = {}
 
-        # 6. BBB enrichment for any vendor that hasn't been scraped yet.
+        # 6. BBB enrichment for any eligible vendor that hasn't been scraped yet.
         bbb_scrape_count = 0
         for pid, v in vendors.items():
             if v.bbb_fetched_at is not None:
@@ -158,9 +171,11 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
             cache.upsert_bbb(db, pid, payload)
         db.flush()
 
-        # 7. Recompute cumulative scores after enrichment.
+        # 7. Recompute cumulative scores after enrichment. Also score the
+        #    name-filtered vendors (pure CPU, no API cost) so the admin UI
+        #    can show "we dropped X which had a 4.7 Google rating".
         vendors = cache.get_vendors(db, list(vendors.keys()))
-        for v in vendors.values():
+        for v in list(vendors.values()) + list(name_filtered.values()):
             res = scoring.compute_cumulative(
                 google_rating=v.google_rating,
                 google_user_rating_count=v.google_user_rating_count,
@@ -194,7 +209,11 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
         # Subjective ranking is NOT computed here — it runs in subpart 3 once
         # the outreach agent has collected a quote per vendor. Survivors
         # arrive at `prospecting` status with subjective_rank_score / rank /
-        # quote_cents all null.
+        # quoted_price_cents all null.
+        #
+        # Every discovered vendor gets a negotiation row — name-filtered and
+        # hard-filtered ones both arrive as filtered=True with a reason
+        # string so the admin + command center can explain the exclusion.
         for v in vendors.values():
             bayes = (v.cumulative_score_breakdown or {}).get("bayes_rating_1_to_5") if v.cumulative_score_breakdown else None
             f = apply_filters(work_order, v, bayes)
@@ -206,6 +225,21 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
                 filter_reasons=f.reasons or None,
             )
             db.add(neg)
+
+        if name_filtered:
+            name_reason = (
+                f"display_name does not match trade keywords: "
+                f"{', '.join(spec.name_keywords)}"
+            )
+            for v in name_filtered.values():
+                neg = Negotiation(
+                    work_order_id=work_order.id,
+                    vendor_place_id=v.place_id,
+                    discovery_run_id=run.id,
+                    filtered=True,
+                    filter_reasons=[name_reason],
+                )
+                db.add(neg)
 
         run.duration_ms = int((time.monotonic() - started) * 1000)
         db.commit()

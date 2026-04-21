@@ -5,7 +5,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .enums import EngagementStatus, Trade, Urgency
+from .enums import MessageChannel, MessageSender, NegotiationState, Trade, Urgency
 
 
 # Fields that must be non-None before a work order can be persisted.
@@ -111,6 +111,7 @@ class WorkOrderRead(BaseModel):
     quality_threshold: Optional[float] = None
     requires_licensed: bool
     requires_insured: bool
+    loop_iteration: int = 0
 
 
 class IntakeConfirmResponse(BaseModel):
@@ -181,6 +182,8 @@ class VendorRead(BaseModel):
     website_uri: Optional[str] = None
     price_level: Optional[int] = None
     emergency_service_24_7: bool = False
+    email: Optional[str] = None
+    persona_markdown: Optional[str] = None
 
     bbb_profile_url: Optional[str] = None
     bbb_grade: Optional[str] = None
@@ -207,6 +210,7 @@ class NegotiationRead(BaseModel):
     vendor_place_id: str
     discovery_run_id: str
 
+    # Subpart 2 subjective ranking — filled in after quotes arrive.
     subjective_rank_score: Optional[float] = None
     subjective_rank_breakdown: Optional[dict[str, Any]] = None
     rank: Optional[int] = None
@@ -214,13 +218,29 @@ class NegotiationRead(BaseModel):
     filtered: bool
     filter_reasons: Optional[list[str]] = None
 
-    status: EngagementStatus
-
-    messages: Optional[list[dict[str, Any]]] = None
-    actions_log: Optional[list[dict[str, Any]]] = None
+    # Subpart 3 state + quote.
+    state: NegotiationState
+    quoted_price_cents: Optional[int] = None
+    quoted_available_at: Optional[datetime] = None
+    escalated: bool = False
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
     created_at: datetime
     last_updated_at: datetime
+
+
+class NegotiationMessageRead(BaseModel):
+    """One row from `negotiation_messages`."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    negotiation_id: str
+    sender: MessageSender
+    channel: MessageChannel
+    iteration: int
+    content: dict[str, Any]
+    created_at: datetime
 
 
 class RankedVendor(BaseModel):
@@ -262,10 +282,54 @@ class DiscoveryRunResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Negotiation scheduler / tick
+# ---------------------------------------------------------------------------
+
+
+class TickRequest(BaseModel):
+    work_order_id: str
+
+
+class NegotiationEventRead(BaseModel):
+    negotiation_id: str
+    vendor_place_id: str
+    vendor_display_name: Optional[str] = None
+    state_before: str
+    state_after: str
+    actor: str
+    outcome: str
+    message_id: Optional[str] = None
+    detail: Optional[dict[str, Any]] = None
+
+
+class WinnerPickRead(BaseModel):
+    ranked: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TickResponse(BaseModel):
+    work_order_id: str
+    iteration: int
+    events: list[NegotiationEventRead]
+    winner_pick: Optional[WinnerPickRead] = None
+
+
+# ---------------------------------------------------------------------------
+# Admin
+# ---------------------------------------------------------------------------
+
+
 class AdminNegotiationRead(NegotiationRead):
-    """Negotiation row with vendor display_name joined for readability."""
+    """Negotiation row hydrated for the admin explorer.
+
+    Joins vendor display_name + cumulative_score and eagerly embeds the full
+    message thread pulled from `negotiation_messages`. Until quotes arrive,
+    the admin UI sorts by `vendor_cumulative_score` (quality-first proxy).
+    """
 
     vendor_display_name: Optional[str] = None
+    vendor_cumulative_score: Optional[float] = None
+    messages: list[NegotiationMessageRead] = Field(default_factory=list)
 
 
 class AdminTableCounts(BaseModel):
@@ -273,6 +337,7 @@ class AdminTableCounts(BaseModel):
     vendors: int
     discovery_runs: int
     negotiations: int
+    negotiation_messages: int
 
 
 class AdminOverview(BaseModel):

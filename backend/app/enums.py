@@ -17,18 +17,51 @@ class Urgency(str, Enum):
     FLEXIBLE = "flexible"
 
 
-class EngagementStatus(str, Enum):
-    """State machine for a (work_order × vendor) engagement.
+class NegotiationState(str, Enum):
+    """State machine for a (work_order × vendor) negotiation.
 
-    Discovery seeds rows at PROSPECTING; subpart 3 advances them through
-    the rest of the funnel.
+    The first five are active; the last four are terminal (write-once).
+    See `docs/Step 3.md` for the authoritative transition table.
     """
 
+    # Active
     PROSPECTING = "prospecting"
     CONTACTED = "contacted"
-    QUOTED = "quoted"
     NEGOTIATING = "negotiating"
-    DISPATCHED = "dispatched"
+    QUOTED = "quoted"
+    SCHEDULED = "scheduled"
+    # Terminal
     COMPLETED = "completed"
+    NOSHOW = "noshow"
     DECLINED = "declined"
-    GHOSTED = "ghosted"
+    CANCELLED = "cancelled"
+
+
+ACTIVE_STATES: frozenset[NegotiationState] = frozenset(
+    {
+        NegotiationState.PROSPECTING,
+        NegotiationState.CONTACTED,
+        NegotiationState.NEGOTIATING,
+        NegotiationState.QUOTED,
+        NegotiationState.SCHEDULED,
+    }
+)
+TERMINAL_STATES: frozenset[NegotiationState] = frozenset(
+    {
+        NegotiationState.COMPLETED,
+        NegotiationState.NOSHOW,
+        NegotiationState.DECLINED,
+        NegotiationState.CANCELLED,
+    }
+)
+
+
+class MessageSender(str, Enum):
+    TAVI = "tavi"
+    VENDOR = "vendor"
+
+
+class MessageChannel(str, Enum):
+    EMAIL = "email"
+    SMS = "sms"
+    PHONE = "phone"

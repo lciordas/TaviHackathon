@@ -24,26 +24,23 @@ router = APIRouter()
 
 
 def _hydrate(db: Session, run: DiscoveryRun) -> DiscoveryRunResponse:
-    negotiations = (
-        db.query(Negotiation)
+    # Pre-subpart-3 the `rank` column is null for every survivor. Order by
+    # vendor quality as a quality-first proxy; once subpart 3 fills in
+    # subjective_rank_score and rank, this should prefer rank asc.
+    rows = (
+        db.query(Negotiation, Vendor)
+        .join(Vendor, Vendor.place_id == Negotiation.vendor_place_id)
         .filter(Negotiation.discovery_run_id == run.id)
         .order_by(
             Negotiation.filtered.asc(),
             Negotiation.rank.asc().nulls_last(),
+            Vendor.cumulative_score.desc().nulls_last(),
         )
         .all()
     )
-    place_ids = [n.vendor_place_id for n in negotiations]
-    vendors = {
-        v.place_id: v
-        for v in db.query(Vendor).filter(Vendor.place_id.in_(place_ids)).all()
-    }
     ranked: list[RankedVendor] = []
     filtered: list[RankedVendor] = []
-    for n in negotiations:
-        v = vendors.get(n.vendor_place_id)
-        if v is None:
-            continue
+    for n, v in rows:
         entry = RankedVendor(
             negotiation=NegotiationRead.model_validate(n),
             vendor=VendorRead.model_validate(v),

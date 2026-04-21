@@ -1,17 +1,19 @@
-"""Scoring formulas — Bayesian rating, cumulative composite, subjective per-order."""
+"""Scoring formulas — Bayesian rating, cumulative composite, quote-aware subjective."""
 from __future__ import annotations
 
 import pytest
 
 from app.enums import Urgency
 from app.services.discovery.scoring import (
-    BAYES_PRIOR_RATING,
-    BAYES_PRIOR_STRENGTH,
-    SUBJECTIVE_WEIGHTS,
+    DEFAULT_WEIGHTS_BY_URGENCY,
+    PRESET_WEIGHTS,
+    RankingWeights,
     bayes_rating,
     compute_cumulative,
     compute_subjective,
+    default_weights_for,
     haversine_miles,
+    price_fit,
 )
 
 
@@ -36,7 +38,7 @@ def test_bayes_returns_none_for_missing_rating():
 
 
 # ---------------------------------------------------------------------------
-# Cumulative score — full signals
+# Cumulative (objective) score
 # ---------------------------------------------------------------------------
 
 def test_cumulative_premium_vendor_high_score():
@@ -65,10 +67,6 @@ def test_cumulative_low_quality_vendor_low_score():
     assert res.score < 0.4
 
 
-# ---------------------------------------------------------------------------
-# Cumulative score — missing BBB → renormalized to rating only
-# ---------------------------------------------------------------------------
-
 def test_cumulative_no_bbb_falls_back_to_rating_only():
     res = compute_cumulative(
         google_rating=4.4,
@@ -81,12 +79,10 @@ def test_cumulative_no_bbb_falls_back_to_rating_only():
     weights = res.breakdown["weights_applied"]
     assert set(weights.keys()) == {"bayes_rating"}
     assert weights["bayes_rating"] == pytest.approx(1.0)
-    # bayes ≈ 4.34 → normalized ≈ 0.835
     assert 0.8 < res.score < 0.9
 
 
 def test_cumulative_handles_zero_complaints():
-    # 0 complaints → resolution rate = 1.0
     res = compute_cumulative(
         google_rating=4.5,
         google_user_rating_count=200,
@@ -99,60 +95,116 @@ def test_cumulative_handles_zero_complaints():
 
 
 # ---------------------------------------------------------------------------
-# Weight profiles
+# RankingWeights + defaults
 # ---------------------------------------------------------------------------
 
-def test_subjective_weights_sum_to_one_for_each_urgency():
-    for urgency, weights in SUBJECTIVE_WEIGHTS.items():
-        assert sum(weights.values()) == pytest.approx(1.0), urgency
+def test_ranking_weights_must_sum_to_one():
+    RankingWeights(quality=0.5, price=0.5)
+    RankingWeights(quality=1.0, price=0.0)
+    with pytest.raises(ValueError):
+        RankingWeights(quality=0.7, price=0.7)
 
 
-def test_subjective_emergency_rewards_distance_and_24_7():
-    # Same vendor (high cumulative, close, 24/7) under each urgency.
-    base = dict(
-        cumulative_score=0.85,
-        distance_miles=2.0,
-        emergency_service_24_7=True,
-        price_level=2,
+def test_default_weights_sum_to_one_for_every_urgency():
+    for u, w in DEFAULT_WEIGHTS_BY_URGENCY.items():
+        assert w.quality + w.price == pytest.approx(1.0), u
+
+
+def test_preset_weights_sum_to_one():
+    for name, w in PRESET_WEIGHTS.items():
+        assert w.quality + w.price == pytest.approx(1.0), name
+
+
+def test_emergency_default_favors_quality_over_price():
+    w = default_weights_for(Urgency.EMERGENCY)
+    assert w.quality > w.price
+
+
+def test_flexible_default_favors_price_over_quality():
+    w = default_weights_for(Urgency.FLEXIBLE)
+    assert w.price > w.quality
+
+
+# ---------------------------------------------------------------------------
+# price_fit
+# ---------------------------------------------------------------------------
+
+def test_price_fit_well_under_budget_is_one():
+    # Quote at 40% of budget → full 1.0 fit
+    assert price_fit(40, 100) == 1.0
+
+
+def test_price_fit_at_half_budget_is_one():
+    assert price_fit(50, 100) == 1.0
+
+
+def test_price_fit_at_full_budget_decays():
+    val = price_fit(100, 100)
+    assert 0.0 < val < 1.0
+
+
+def test_price_fit_at_double_budget_is_zero():
+    assert price_fit(200, 100) == 0.0
+
+
+def test_price_fit_over_double_is_still_zero():
+    assert price_fit(500, 100) == 0.0
+
+
+def test_price_fit_zero_budget_is_neutral():
+    assert price_fit(100, 0) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# compute_subjective (quote-aware)
+# ---------------------------------------------------------------------------
+
+def test_compute_subjective_rewards_cheaper_quote():
+    cheap = compute_subjective(
+        cumulative_score=0.70, quote_cents=50_00, budget_cap_cents=100_00,
+        weights=RankingWeights(quality=0.5, price=0.5),
     )
-    emergency = compute_subjective(urgency=Urgency.EMERGENCY, **base)
-    scheduled = compute_subjective(urgency=Urgency.SCHEDULED, **base)
-    # Emergency rewards distance + 24/7 → both contribute meaningfully.
-    em_contrib = emergency.breakdown["contributions"]
-    assert em_contrib["distance_fit"] > em_contrib["cumulative"] * 0.5
-    assert em_contrib["h24_7_fit"] > 0
-    # Scheduled puts most weight on cumulative, none on 24/7.
-    sc_contrib = scheduled.breakdown["contributions"]
-    assert sc_contrib["cumulative"] > 0.4
-    assert sc_contrib["h24_7_fit"] == 0.0
+    expensive = compute_subjective(
+        cumulative_score=0.70, quote_cents=150_00, budget_cap_cents=100_00,
+        weights=RankingWeights(quality=0.5, price=0.5),
+    )
+    assert cheap.score > expensive.score
 
 
-def test_subjective_24_7_only_rewarded_when_urgency_warrants():
-    # 24/7 under SCHEDULED should not contribute (urgency doesn't warrant it).
+def test_compute_subjective_weights_shift_outcome():
+    # Quality-tilted weights favor the high-quality vendor; price-tilted weights
+    # swing toward the cheap vendor.
+    high_quality_expensive = dict(cumulative_score=0.90, quote_cents=90_00, budget_cap_cents=100_00)
+    low_quality_cheap = dict(cumulative_score=0.40, quote_cents=50_00, budget_cap_cents=100_00)
+
+    quality_lean = PRESET_WEIGHTS["quality_leaning"]
+    price_lean = PRESET_WEIGHTS["price_leaning"]
+
+    hq_under_quality = compute_subjective(weights=quality_lean, **high_quality_expensive)
+    lq_under_quality = compute_subjective(weights=quality_lean, **low_quality_cheap)
+    assert hq_under_quality.score > lq_under_quality.score
+
+    hq_under_price = compute_subjective(weights=price_lean, **high_quality_expensive)
+    lq_under_price = compute_subjective(weights=price_lean, **low_quality_cheap)
+    assert lq_under_price.score > hq_under_price.score
+
+
+def test_compute_subjective_breakdown_shape():
     res = compute_subjective(
-        cumulative_score=0.85, urgency=Urgency.SCHEDULED, distance_miles=5.0,
-        emergency_service_24_7=True, price_level=2,
+        cumulative_score=0.75, quote_cents=80_00, budget_cap_cents=100_00,
+        weights=RankingWeights(quality=0.6, price=0.4),
     )
-    assert res.breakdown["signals"]["h24_7_fit"] == 0.0
-
-
-def test_subjective_distance_decays_linearly():
-    near = compute_subjective(
-        cumulative_score=0.5, urgency=Urgency.EMERGENCY, distance_miles=2.0,
-        emergency_service_24_7=False, price_level=2,
-    )
-    far = compute_subjective(
-        cumulative_score=0.5, urgency=Urgency.EMERGENCY, distance_miles=18.0,
-        emergency_service_24_7=False, price_level=2,
-    )
-    assert near.score > far.score
+    assert "weights" in res.breakdown
+    assert "signals" in res.breakdown
+    assert "contributions" in res.breakdown
+    assert res.breakdown["signals"]["quote_cents"] == 80_00
+    assert res.breakdown["signals"]["cumulative_score"] == 0.75
 
 
 # ---------------------------------------------------------------------------
-# Distance utility
+# Distance utility (still used by the radius hard filter)
 # ---------------------------------------------------------------------------
 
 def test_haversine_dallas_to_fort_worth():
-    # ~30 miles
     miles = haversine_miles(32.7767, -96.7970, 32.7555, -97.3308)
     assert 28 < miles < 33

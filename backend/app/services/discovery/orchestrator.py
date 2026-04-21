@@ -190,8 +190,11 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
         db.add(run)
         db.flush()
 
-        # 9. Filter + score per vendor, create Negotiation rows.
-        survivors: list[tuple[Negotiation, float]] = []  # (row, distance) for ranking
+        # 9. Apply hard filters + create Negotiation rows.
+        # Subjective ranking is NOT computed here — it runs in subpart 3 once
+        # the outreach agent has collected a quote per vendor. Survivors
+        # arrive at `prospecting` status with subjective_rank_score / rank /
+        # quote_cents all null.
         for v in vendors.values():
             bayes = (v.cumulative_score_breakdown or {}).get("bayes_rating_1_to_5") if v.cumulative_score_breakdown else None
             f = apply_filters(work_order, v, bayes)
@@ -202,26 +205,7 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
                 filtered=not f.passed,
                 filter_reasons=f.reasons or None,
             )
-            if f.passed:
-                sub = scoring.compute_subjective(
-                    cumulative_score=v.cumulative_score or 0.0,
-                    urgency=work_order.urgency,
-                    distance_miles=f.distance_miles,
-                    emergency_service_24_7=v.emergency_service_24_7,
-                    price_level=v.price_level,
-                )
-                neg.subjective_rank_score = sub.score
-                neg.subjective_rank_breakdown = {
-                    **sub.breakdown,
-                    "distance_miles": round(f.distance_miles, 2),
-                }
-                survivors.append((neg, sub.score))
             db.add(neg)
-
-        # 10. Assign rank by subjective score descending.
-        survivors.sort(key=lambda t: t[1], reverse=True)
-        for i, (neg, _) in enumerate(survivors, start=1):
-            neg.rank = i
 
         run.duration_ms = int((time.monotonic() - started) * 1000)
         db.commit()

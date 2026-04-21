@@ -100,13 +100,14 @@ Given a submitted work order, discover candidate vendors within ~20 miles using 
 
 - `vendors` — cache keyed by Google `place_id`. Holds Google fields (display_name, rating, review count, hours, phone, website, 24/7 flag), BBB fields (grade, accreditation, complaints, years-in-business), and the computed `cumulative_score` + breakdown. Re-fetched only when stale.
 - `discovery_runs` — one row per `/discovery/run` invocation. Audit + cost tracking: candidate count, cache hits, API detail calls, BBB scrape count, duration, weight profile (urgency).
-- `negotiations` — one row per (work_order × vendor). Holds the per-order subjective rank + breakdown, filter state, and placeholder columns (`messages`, `actions_log`, `status`) that subpart 3 will drive.
+- `negotiations` — one row per (work_order × vendor). Holds filter state, `quote_cents` (filled by subpart 3 when a vendor responds), `subjective_rank_score` + `rank` (also subpart-3 territory), engagement `status`, and placeholder `messages` / `actions_log` JSON columns.
 
 ### Scoring (`scoring.py`)
 
-Two distinct scores:
-- **`cumulative_score`** (objective, on `Vendor`) — Bayesian-adjusted Google rating (45%) + BBB grade (25%) + complaint resolution rate (10%) + tenure (20%). Missing signals drop out and remaining weights renormalize. Stable per vendor across customers.
-- **`subjective_rank_score`** (per-order, on `Negotiation`) — blends `cumulative_score` with distance fit, 24/7 availability fit, and budget fit. Weights shift by `WorkOrder.urgency` (emergency leans heavily on distance + 24/7; scheduled leans on cumulative + budget).
+Two scores with very different lifecycles:
+
+- **`cumulative_score`** (objective, on `Vendor`) — **runs at discovery time.** Bayesian-adjusted Google rating (45%) + BBB grade (25%) + complaint resolution rate (10%) + tenure (20%). Missing signals drop out and remaining weights renormalize. Stable per vendor across customers.
+- **`subjective_rank_score`** (per-order, on `Negotiation`) — **does NOT run at discovery time.** Requires `Negotiation.quote_cents`, which only exists after subpart 3's outreach agent has contacted a vendor and received a price. Computed by `compute_subjective(cumulative_score, quote_cents, budget_cap_cents, weights: RankingWeights)`. Leaves a Negotiation's rank / subjective score null until a quote is in.
 
 ### Filters (`filters.py`)
 
@@ -124,14 +125,22 @@ Hard filters applied before ranking: business status != operational, distance > 
 - In-DB vendor cache keeps Places bill flat across repeated discovery runs
 - BBB enrichment is best-effort; vendors without BBB profiles still score (cumulative weights renormalize)
 - `quality_threshold` is checked against the Bayesian-adjusted rating, not raw Google stars
+- Discovery does NOT rank — survivors land at `prospecting` with null rank / subjective score. Ranking is a subpart-3 job once vendors quote.
 
 ## Subpart 3 — Vendor contact / auctioning (planned)
 
-Agentic outreach across email / SMS / phone, unified per-engagement thread, kanban command center keyed to an engagement state machine (`prospecting → contacted → quoted → negotiating → dispatched → completed`, with `declined` / `ghosted` off-ramps). LLM-simulated vendor personas auto-respond when messaged. Outreach + UI not yet started, but the DB is already wired:
+Agentic outreach across email / SMS / phone, unified per-engagement thread, kanban command center keyed to an engagement state machine (`prospecting → contacted → quoted → negotiating → dispatched → completed`, with `declined` / `ghosted` off-ramps). LLM-simulated vendor personas auto-respond when messaged. Outreach + UI not yet started, but the DB + scoring helpers are already wired:
 
 - `EngagementStatus` enum in `backend/app/enums.py`
-- `Negotiation.status` column defaults to `PROSPECTING` at discovery time
-- `Negotiation.messages` (JSON) + `Negotiation.actions_log` (JSON) are pre-allocated for subpart 3 to fill in
+- `Negotiation.status` defaults to `PROSPECTING` at discovery time
+- `Negotiation.quote_cents` (int, null until quote arrives) — input to the subjective-ranking formula
+- `Negotiation.messages` (JSON) + `Negotiation.actions_log` (JSON) are pre-allocated for outreach history + discrete actions
+- `scoring.compute_subjective(cumulative_score, quote_cents, budget_cap_cents, weights)` → quote-aware rank score (quality * w_quality + price_fit * w_price)
+- `scoring.RankingWeights(quality, price)` — two-axis weight profile (sums to 1.0); a `speed` axis lands when vendor-proposed schedules arrive
+- `scoring.default_weights_for(urgency)` — starting profile keyed to `WorkOrder.urgency`. Emergency leans heavily on quality (0.80 / 0.20); flexible leans on price (0.35 / 0.65)
+- `scoring.PRESET_WEIGHTS` — named profiles for the FM-override UI (`balanced`, `quality_leaning`, `price_leaning`, `quality_only`, `price_only`)
+
+**Planned ranking UX**: once every `prospecting` negotiation moves to `quoted` (has `quote_cents`), subpart 3 computes subjective rank using the work order's default weights and surfaces the ranked list to the facility manager. The UI explains what the ranking is optimizing for ("You asked for it urgent, so I leaned toward quality") and offers one-click re-rank using the `PRESET_WEIGHTS` — no new vendor interaction needed, just a different weights arg passed to `compute_subjective`.
 
 ## Admin DB explorer (`frontend/app/admin/page.tsx`)
 
@@ -154,7 +163,7 @@ Read-only surface for inspecting the pipeline end-to-end during the demo. Lists 
 - Initialize SQLite schema: `uv run python create_db.py`
 - Run server: `uv run uvicorn app.main:app --reload --port 8000`
 - Interactive chat REPL (talks to the running server): `uv run python chat.py`
-- Unit tests: `uv run pytest`
+- Unit tests: `uv run pytest` — covers hours-overlap edge cases (cross-midnight / 24/7 / missing hours), scoring math (Bayesian anchor, urgency weight profiles, BBB-missing reweight), and the BBB HTML parser against inline fixtures
 
 ### Frontend (`frontend/`)
 

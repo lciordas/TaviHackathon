@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 from sqlalchemy.orm import Session
 
 from ...models import Vendor
+from ..personas import assign_to_vendor
 
 CACHE_TTL = timedelta(days=30)
 
@@ -33,16 +34,25 @@ def is_google_fresh(vendor: Vendor) -> bool:
 
 
 def upsert_google(db: Session, payload: dict) -> Vendor:
-    """Insert/update Google-sourced fields. Caller commits."""
+    """Insert/update Google-sourced fields. Caller commits.
+
+    First-cache only: assigns a random persona + synthesized contact email
+    so the vendor can be simulated and contacted in the demo. These fields
+    are stable across re-discoveries — we don't reshuffle mid-negotiation.
+    """
     place_id = payload["place_id"]
     v = db.get(Vendor, place_id)
-    if v is None:
+    is_new = v is None
+    if is_new:
         v = Vendor(place_id=place_id)
         db.add(v)
     for k, val in payload.items():
         if k == "place_id":
             continue
         setattr(v, k, val)
+    if is_new:
+        # display_name is set above, so synthesize_email has something to work with.
+        assign_to_vendor(v)
     return v
 
 

@@ -389,14 +389,22 @@ export default function Home() {
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-sm text-emerald-900 max-w-md">
                   <div className="font-medium">Submitted.</div>
                   <div className="mt-1 text-xs text-emerald-800">
-                    Work order <code className="font-mono">{submittedId.slice(0, 8)}</code> created. Vendor discovery is running in the background — results will appear in the DB Explorer in a few seconds.
+                    Work order <code className="font-mono">{submittedId.slice(0, 8)}</code> created. Vendor discovery is running in the background — once it finishes, advance the negotiations tick by tick in the command center.
                   </div>
-                  <Link
-                    href="/admin"
-                    className="mt-2 inline-block text-xs font-medium text-emerald-900 underline hover:no-underline"
-                  >
-                    View in DB Explorer →
-                  </Link>
+                  <div className="mt-2 flex items-center gap-3">
+                    <Link
+                      href={`/work-orders/${submittedId}`}
+                      className="inline-block text-xs font-medium text-emerald-900 underline hover:no-underline"
+                    >
+                      Open command center →
+                    </Link>
+                    <Link
+                      href="/admin"
+                      className="inline-block text-xs font-medium text-emerald-900 underline hover:no-underline"
+                    >
+                      DB Explorer →
+                    </Link>
+                  </div>
                 </div>
               </div>
             )}

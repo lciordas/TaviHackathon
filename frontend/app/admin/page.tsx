@@ -7,7 +7,13 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
 type TabKey = "work_orders" | "vendors" | "discovery_runs" | "negotiations";
 
-type Counts = { work_orders: number; vendors: number; discovery_runs: number; negotiations: number };
+type Counts = {
+  work_orders: number;
+  vendors: number;
+  discovery_runs: number;
+  negotiations: number;
+  negotiation_messages: number;
+};
 
 type WorkOrder = {
   id: string;
@@ -73,20 +79,34 @@ type DiscoveryRun = {
   duration_ms: number | null;
 };
 
+type NegotiationMessage = {
+  id: string;
+  negotiation_id: string;
+  sender: "tavi" | "vendor";
+  channel: "email" | "sms" | "phone";
+  iteration: number;
+  content: Record<string, unknown>;
+  created_at: string;
+};
+
 type Negotiation = {
   id: string;
   work_order_id: string;
   vendor_place_id: string;
   vendor_display_name: string | null;
+  vendor_cumulative_score: number | null;
   discovery_run_id: string;
+  quoted_price_cents: number | null;
+  quoted_available_at: string | null;
+  escalated: boolean;
+  attributes: Record<string, unknown>;
   subjective_rank_score: number | null;
   subjective_rank_breakdown: Record<string, unknown> | null;
   rank: number | null;
   filtered: boolean;
   filter_reasons: string[] | null;
-  status: string;
-  messages: unknown[] | null;
-  actions_log: unknown[] | null;
+  state: string;
+  messages: NegotiationMessage[];
   created_at: string;
   last_updated_at: string;
 };
@@ -136,12 +156,13 @@ function statusColor(s: string): string {
   return {
     prospecting: "bg-slate-100 text-slate-700 border-slate-200",
     contacted: "bg-sky-100 text-sky-900 border-sky-200",
-    quoted: "bg-indigo-100 text-indigo-900 border-indigo-200",
     negotiating: "bg-violet-100 text-violet-900 border-violet-200",
-    dispatched: "bg-emerald-100 text-emerald-900 border-emerald-200",
+    quoted: "bg-indigo-100 text-indigo-900 border-indigo-200",
+    scheduled: "bg-emerald-100 text-emerald-900 border-emerald-200",
     completed: "bg-emerald-100 text-emerald-900 border-emerald-200",
-    declined: "bg-red-100 text-red-900 border-red-200",
-    ghosted: "bg-red-100 text-red-900 border-red-200",
+    noshow: "bg-red-100 text-red-900 border-red-200",
+    declined: "bg-slate-200 text-slate-700 border-slate-300",
+    cancelled: "bg-slate-200 text-slate-700 border-slate-300",
   }[s] ?? "bg-slate-100 text-slate-700 border-slate-200";
 }
 
@@ -584,80 +605,103 @@ function NegotiationsTable({ rows, expanded, toggle }: TableProps<Negotiation>) 
   if (rows === null) return null;
   if (rows.length === 0) return <Empty msg="No negotiations yet. Discovery runs create these." />;
   return (
-    <TableShell>
-      <thead className="bg-slate-50">
-        <tr>
-          <Th>Rank</Th>
-          <Th>Vendor</Th>
-          <Th>Work Order</Th>
-          <Th>Status</Th>
-          <Th>Score</Th>
-          <Th>Filter reasons</Th>
-          <Th>Created</Th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((n) => (
-          <ExpandableRow key={n.id} id={n.id} expanded={!!expanded[n.id]} toggle={toggle} cols={7}
-            summary={
-              <>
-                <Td>
-                  {n.filtered ? (
-                    <Badge className="bg-red-100 text-red-900 border-red-200">filtered</Badge>
-                  ) : n.rank !== null ? (
-                    <span className="font-mono font-semibold text-slate-900">#{n.rank}</span>
-                  ) : (
-                    <span className="text-slate-400">—</span>
-                  )}
-                </Td>
-                <Td>
-                  <div className="font-medium">{n.vendor_display_name ?? "—"}</div>
-                  <code className="font-mono text-xs text-slate-400">{short(n.vendor_place_id, 12)}…</code>
-                </Td>
-                <Td><code className="font-mono text-xs text-slate-500">{short(n.work_order_id)}</code></Td>
-                <Td><Badge className={statusColor(n.status)}>{n.status}</Badge></Td>
-                <Td>
-                  {n.subjective_rank_score !== null ? (
-                    <ScoreBar value={n.subjective_rank_score} />
-                  ) : (
-                    <span className="text-slate-400">—</span>
-                  )}
-                </Td>
-                <Td>
-                  {n.filter_reasons && n.filter_reasons.length > 0 ? (
-                    <div className="flex flex-wrap gap-1">
-                      {n.filter_reasons.map((r, i) => (
-                        <Badge key={i} className="bg-red-50 text-red-800 border-red-100">
-                          {r}
-                        </Badge>
-                      ))}
-                    </div>
-                  ) : (
-                    <span className="text-slate-400 text-xs">—</span>
-                  )}
-                </Td>
-                <Td className="text-slate-500 text-xs">{dt(n.created_at)}</Td>
-              </>
-            }
-            detail={
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <Field label="Negotiation ID"><code className="font-mono text-xs">{n.id}</code></Field>
-                <Field label="Discovery Run"><code className="font-mono text-xs">{n.discovery_run_id}</code></Field>
-                <Field label="Vendor place_id" className="col-span-2"><code className="font-mono text-xs">{n.vendor_place_id}</code></Field>
-                <Field label="Subjective breakdown" className="col-span-2"><Json data={n.subjective_rank_breakdown} /></Field>
-                <Field label="Messages" className="col-span-2">
-                  {n.messages && n.messages.length > 0 ? <Json data={n.messages} /> : <span className="text-slate-400 text-xs">empty (filled in subpart 3)</span>}
-                </Field>
-                <Field label="Actions log" className="col-span-2">
-                  {n.actions_log && n.actions_log.length > 0 ? <Json data={n.actions_log} /> : <span className="text-slate-400 text-xs">empty (filled in subpart 3)</span>}
-                </Field>
-                <Field label="Last updated">{dt(n.last_updated_at)}</Field>
-              </div>
-            }
-          />
-        ))}
-      </tbody>
-    </TableShell>
+    <>
+      <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-xs text-sky-900">
+        <strong>Ranking deferred to subpart 3.</strong> Rows here show every (work order × vendor) pair surfaced by discovery. Subjective rank + price comparison only get computed once the outreach agent collects a quote per vendor. For now, survivors are ordered by vendor quality as a pre-quote proxy.
+      </div>
+      <TableShell>
+        <thead className="bg-slate-50">
+          <tr>
+            <Th>State</Th>
+            <Th>Vendor</Th>
+            <Th>Work Order</Th>
+            <Th>Status</Th>
+            <Th>Quality</Th>
+            <Th>Quote</Th>
+            <Th>Rank</Th>
+            <Th>Filter reasons</Th>
+            <Th>Created</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((n) => (
+            <ExpandableRow key={n.id} id={n.id} expanded={!!expanded[n.id]} toggle={toggle} cols={9}
+              summary={
+                <>
+                  <Td>
+                    {n.filtered ? (
+                      <Badge className="bg-red-100 text-red-900 border-red-200">filtered</Badge>
+                    ) : (
+                      <Badge className="bg-slate-100 text-slate-700 border-slate-200">prospecting</Badge>
+                    )}
+                  </Td>
+                  <Td>
+                    <div className="font-medium">{n.vendor_display_name ?? "—"}</div>
+                    <code className="font-mono text-xs text-slate-400">{short(n.vendor_place_id, 12)}…</code>
+                  </Td>
+                  <Td><code className="font-mono text-xs text-slate-500">{short(n.work_order_id)}</code></Td>
+                  <Td><Badge className={statusColor(n.state)}>{n.state}</Badge></Td>
+                  <Td>
+                    {n.vendor_cumulative_score !== null ? (
+                      <ScoreBar value={n.vendor_cumulative_score} />
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </Td>
+                  <Td>
+                    {n.quoted_price_cents !== null ? (
+                      <span className="font-medium">${(n.quoted_price_cents / 100).toLocaleString()}</span>
+                    ) : (
+                      <span className="text-slate-400 text-xs" title="Awaiting vendor quote">—</span>
+                    )}
+                  </Td>
+                  <Td>
+                    {n.rank !== null ? (
+                      <span className="font-mono font-semibold text-slate-900">#{n.rank}</span>
+                    ) : (
+                      <span className="text-slate-400 text-xs" title="Ranked after quote arrives">—</span>
+                    )}
+                  </Td>
+                  <Td>
+                    {n.filter_reasons && n.filter_reasons.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {n.filter_reasons.map((r, i) => (
+                          <Badge key={i} className="bg-red-50 text-red-800 border-red-100">
+                            {r}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-slate-400 text-xs">—</span>
+                    )}
+                  </Td>
+                  <Td className="text-slate-500 text-xs">{dt(n.created_at)}</Td>
+                </>
+              }
+              detail={
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <Field label="Negotiation ID"><code className="font-mono text-xs">{n.id}</code></Field>
+                  <Field label="Discovery Run"><code className="font-mono text-xs">{n.discovery_run_id}</code></Field>
+                  <Field label="Vendor place_id" className="col-span-2"><code className="font-mono text-xs">{n.vendor_place_id}</code></Field>
+                  <Field label="Subjective breakdown" className="col-span-2">
+                    {n.subjective_rank_breakdown ? <Json data={n.subjective_rank_breakdown} /> : <span className="text-slate-400 text-xs">awaiting quote (subpart 3)</span>}
+                  </Field>
+                  <Field label="Quoted available at">{n.quoted_available_at ? dt(n.quoted_available_at) : <span className="text-slate-400 text-xs">—</span>}</Field>
+                  <Field label="Escalated">{n.escalated ? "Yes" : "No"}</Field>
+                  <Field label="Attributes" className="col-span-2">
+                    {n.attributes && Object.keys(n.attributes).length > 0 ? <Json data={n.attributes} /> : <span className="text-slate-400 text-xs">empty</span>}
+                  </Field>
+                  <Field label={`Messages (${n.messages.length})`} className="col-span-2">
+                    {n.messages.length > 0 ? <Json data={n.messages} /> : <span className="text-slate-400 text-xs">empty</span>}
+                  </Field>
+                  <Field label="Last updated">{dt(n.last_updated_at)}</Field>
+                </div>
+              }
+            />
+          ))}
+        </tbody>
+      </TableShell>
+    </>
   );
 }
 

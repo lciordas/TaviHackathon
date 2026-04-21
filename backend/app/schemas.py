@@ -112,6 +112,7 @@ class WorkOrderRead(BaseModel):
     requires_licensed: bool
     requires_insured: bool
     loop_iteration: int = 0
+    ready_to_schedule: bool = False
 
 
 class IntakeConfirmResponse(BaseModel):

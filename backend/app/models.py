@@ -66,6 +66,16 @@ class WorkOrder(Base):
     # vendor latency as a gap between iterations.
     loop_iteration: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # Gate that marks the work order as ready for a vendor to be booked.
+    # Starts false at intake; flips true when downstream logic decides the
+    # quote pool is mature enough to lock in a winner.
+    ready_to_schedule: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # Pitch template cache — one LLM call per work order, reused across
+    # every vendor's PROSPECTING turn. Stored as JSON {subject, body}; the
+    # body uses {{vendor_name}} as the per-vendor fill.
+    pitch_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
 
 class Vendor(Base):
     """Cache + objective scoreline for one business. Keyed by Google place_id.

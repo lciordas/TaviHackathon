@@ -81,13 +81,6 @@ type TickResponse = {
   work_order_id: string;
   iteration: number;
   events: TickEvent[];
-  winner_pick: { ranked: Array<{
-    negotiation_id: string;
-    vendor_display_name: string | null;
-    rank: number;
-    score: number;
-    action: string;
-  }> } | null;
 };
 
 // ---------------------------------------------------------------------------

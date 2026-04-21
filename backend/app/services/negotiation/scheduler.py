@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -97,16 +97,10 @@ class NegotiationEvent:
 
 
 @dataclass
-class WinnerPickResult:
-    ranked: list[dict] = field(default_factory=list)  # {negotiation_id, vendor_display_name, rank, score, action}
-
-
-@dataclass
 class TickResult:
     work_order_id: str
     iteration: int
     events: list[NegotiationEvent]
-    winner_pick: Optional[WinnerPickResult]
 
 
 class SchedulerError(RuntimeError):
@@ -186,7 +180,6 @@ def tick(db: Session, work_order_id: str) -> TickResult:
         work_order_id=work_order_id,
         iteration=iteration,
         events=events,
-        winner_pick=None,  # legacy field — superseded by the live rank + booking flow
     )
 
 

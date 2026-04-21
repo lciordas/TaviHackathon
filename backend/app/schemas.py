@@ -304,15 +304,10 @@ class NegotiationEventRead(BaseModel):
     detail: Optional[dict[str, Any]] = None
 
 
-class WinnerPickRead(BaseModel):
-    ranked: list[dict[str, Any]] = Field(default_factory=list)
-
-
 class TickResponse(BaseModel):
     work_order_id: str
     iteration: int
     events: list[NegotiationEventRead]
-    winner_pick: Optional[WinnerPickRead] = None
 
 
 # ---------------------------------------------------------------------------

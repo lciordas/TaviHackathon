@@ -20,7 +20,6 @@ from ..schemas import (
     NegotiationMessageRead,
     TickRequest,
     TickResponse,
-    WinnerPickRead,
     WorkOrderRead,
 )
 from ..services.negotiation.scheduler import (
@@ -122,10 +121,8 @@ def _to_response(result: TickResult) -> TickResponse:
         )
         for e in result.events
     ]
-    winner = WinnerPickRead(ranked=result.winner_pick.ranked) if result.winner_pick else None
     return TickResponse(
         work_order_id=result.work_order_id,
         iteration=result.iteration,
         events=events,
-        winner_pick=winner,
     )

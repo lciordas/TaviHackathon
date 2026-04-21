@@ -26,6 +26,7 @@ type WorkOrder = {
   requires_licensed: boolean;
   requires_insured: boolean;
   loop_iteration: number;
+  ready_to_schedule: boolean;
 };
 
 type NegotiationMessage = {
@@ -211,6 +212,15 @@ export default function CommandCenter() {
   const onTick = useCallback(async () => {
     setTicking(true);
     setError(null);
+
+    // Poll the hydrated view every 400ms while the tick is in flight. The
+    // backend commits after each per-negotiation dispatch, so each message
+    // + state change appears in the board as it happens rather than all at
+    // once at the end of the tick.
+    const pollId = window.setInterval(() => {
+      void refresh();
+    }, 400);
+
     try {
       const r = await fetch(`${API_BASE}/negotiations/tick`, {
         method: "POST",
@@ -220,10 +230,11 @@ export default function CommandCenter() {
       if (!r.ok) throw new Error(`tick ${r.status}`);
       const payload = (await r.json()) as TickResponse;
       setLastTick(payload);
-      await refresh();
     } catch (e) {
       setError(`Tick failed: ${String(e)}`);
     } finally {
+      window.clearInterval(pollId);
+      await refresh();  // final sync so the board matches the final commit
       setTicking(false);
     }
   }, [workOrderId, refresh]);
@@ -334,6 +345,11 @@ function WorkOrderHeader({
             <span>budget {money(wo.budget_cap_cents)}</span>
             <span>licensed: {wo.requires_licensed ? "required" : "no"}</span>
             <span>insured: {wo.requires_insured ? "required" : "no"}</span>
+            {wo.ready_to_schedule && (
+              <span className="px-1.5 py-0.5 rounded border border-emerald-300 bg-emerald-50 text-emerald-900 font-medium">
+                ready to schedule
+              </span>
+            )}
           </div>
         </div>
 
@@ -360,9 +376,22 @@ function WorkOrderHeader({
 // ---------------------------------------------------------------------------
 
 function TickBanner({ tick }: { tick: TickResponse }) {
-  const sent = tick.events.filter((e) => e.outcome === "message_sent");
-  const skipped = tick.events.filter((e) => e.outcome === "skipped");
-  const waited = tick.events.filter((e) => e.outcome === "waiting");
+  const MESSAGE_OUTCOMES = new Set([
+    "message_sent",
+    "verification_requested", "verification_progress",
+    "confirmation_requested", "confirmation_handled",
+    "refused",
+  ]);
+  const SILENT_OUTCOMES = new Set(["skipped", "waiting", "queued"]);
+  const TIMEOUT_OUTCOMES = new Set(["silence_timeout", "confirmation_timeout", "verification_timeout"]);
+
+  const msgCount = tick.events.filter((e) => MESSAGE_OUTCOMES.has(e.outcome)).length;
+  const silentCount = tick.events.filter((e) => SILENT_OUTCOMES.has(e.outcome)).length;
+  const timeouts = tick.events.filter((e) => TIMEOUT_OUTCOMES.has(e.outcome));
+  const refused = tick.events.filter((e) => e.outcome === "refused");
+  const verifyReq = tick.events.find((e) => e.outcome === "verification_requested");
+  const confirmReq = tick.events.find((e) => e.outcome === "confirmation_requested");
+  const confirmAck = tick.events.find((e) => e.outcome === "confirmation_handled");
 
   return (
     <div className="bg-slate-900 text-slate-100 rounded-lg px-4 py-3 text-sm">
@@ -370,24 +399,39 @@ function TickBanner({ tick }: { tick: TickResponse }) {
         <span className="text-xs uppercase tracking-wide text-slate-400">
           Iteration {tick.iteration}
         </span>
-        {tick.winner_pick && (
-          <span className="text-xs uppercase tracking-wide text-emerald-300">Winner pick resolved</span>
+        {verifyReq && (
+          <span className="text-xs uppercase tracking-wide text-sky-300">
+            Verifying credentials → {verifyReq.vendor_display_name ?? "—"}
+          </span>
+        )}
+        {confirmReq && (
+          <span className="text-xs uppercase tracking-wide text-indigo-300">
+            Confirmation request → {confirmReq.vendor_display_name ?? "—"}
+          </span>
+        )}
+        {confirmAck && (
+          <span className="text-xs uppercase tracking-wide text-emerald-300">
+            Booking confirmed — {confirmAck.vendor_display_name ?? "—"}
+          </span>
         )}
       </div>
       <div className="text-xs text-slate-300 flex flex-wrap gap-x-5 gap-y-1">
-        <span>{sent.length} message{sent.length === 1 ? "" : "s"} sent</span>
-        <span>{skipped.length} skipped</span>
-        <span>{waited.length} waiting</span>
+        <span>{msgCount} message{msgCount === 1 ? "" : "s"} sent</span>
+        <span>{silentCount} silent</span>
+        {timeouts.length > 0 && (
+          <span className="text-red-300">{timeouts.length} timed out</span>
+        )}
+        {refused.length > 0 && (
+          <span className="text-amber-300">{refused.length} refused</span>
+        )}
       </div>
-      {tick.winner_pick && (
-        <div className="mt-2 text-xs text-slate-200 space-y-0.5">
-          {tick.winner_pick.ranked.map((r) => (
-            <div key={r.negotiation_id}>
-              <span className="font-mono text-slate-400">#{r.rank}</span>{" "}
-              <span className={r.action === "accept" ? "text-emerald-300" : "text-slate-400"}>
-                {r.action.toUpperCase()}
-              </span>{" "}
-              — {r.vendor_display_name ?? "—"} · score {r.score.toFixed(3)}
+      {timeouts.length > 0 && (
+        <div className="mt-2 text-xs text-red-200 space-y-0.5">
+          {timeouts.map((t) => (
+            <div key={t.negotiation_id}>
+              {t.outcome === "silence_timeout" ? "silence timeout" : "confirmation timeout"}
+              {" — "}
+              {t.vendor_display_name ?? "—"}
             </div>
           ))}
         </div>

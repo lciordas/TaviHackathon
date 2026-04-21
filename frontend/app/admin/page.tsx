@@ -34,6 +34,8 @@ type WorkOrder = {
   quality_threshold: number | null;
   requires_licensed: boolean;
   requires_insured: boolean;
+  loop_iteration: number;
+  ready_to_schedule: boolean;
 };
 
 type Vendor = {

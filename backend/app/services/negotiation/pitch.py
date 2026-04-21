@@ -49,10 +49,12 @@ business name should go — a downstream string substitution fills it in.
 
 CONTENT REQUIREMENTS
   - Greet the vendor by name using `{PLACEHOLDER}`.
-  - Introduce Tavi in one short sentence.
-  - Describe the job plainly from the work order (trade, one-line summary
-    of what's needed, city). Do NOT invent details the work order doesn't
-    provide.
+  - Do NOT describe what Tavi is. The recipient knows (or doesn't need
+    to). Skip any "Tavi is an AI-native marketplace" preamble — lead
+    straight into the job.
+  - Describe the job plainly from the work order (trade, one-line
+    summary of what's needed, city). Do NOT invent details the work
+    order doesn't provide.
   - State the requested date/window.
   - Ask whether the vendor is interested and available.
   - Close professionally — no sign-off with a real person's name.

@@ -258,15 +258,18 @@ export default function CommandCenter() {
       if (!r.ok) throw new Error(`tick ${r.status}`);
       const payload = (await r.json()) as TickResponse;
       setLastTick(payload);
-      // Accumulate events in the activity log, newest first.
-      setActivityLog((prev) => {
-        const additions: LogEntry[] = payload.events.map((ev, i) => ({
-          id: `${payload.iteration}-${i}-${ev.negotiation_id}`,
-          tick: payload.iteration,
-          vendorName: ev.vendor_display_name ?? "—",
-          outcome: ev.outcome,
-        }));
-        return [...additions.reverse(), ...prev].slice(0, 200);
+      // Stream events into the activity log one by one so the UI feels
+      // busy during the tick rather than dumping everything at once.
+      const toAdd: LogEntry[] = payload.events.map((ev, i) => ({
+        id: `${payload.iteration}-${i}-${ev.negotiation_id}`,
+        tick: payload.iteration,
+        vendorName: ev.vendor_display_name ?? "—",
+        outcome: ev.outcome,
+      }));
+      toAdd.forEach((entry, idx) => {
+        window.setTimeout(() => {
+          setActivityLog((prev) => [entry, ...prev].slice(0, 200));
+        }, idx * 250);
       });
     } catch (e) {
       setError(`Tick failed: ${String(e)}`);
@@ -302,15 +305,14 @@ export default function CommandCenter() {
     [negs, selectedId],
   );
 
-  // Negotiation IDs with messages past the user's "seen" cursor — show a dot.
-  const newIds = useMemo(() => {
-    const out = new Set<string>();
+  // Per-negotiation unread counts (messages past the "seen" cursor). Used to
+  // drive both the "new" ring and the numeric badge on cards.
+  const unreadByNegId = useMemo(() => {
+    const out: Record<string, number> = {};
     if (!negs) return out;
     for (const n of negs) {
-      if (!n.messages.length) continue;
-      const last = n.messages[n.messages.length - 1].iteration;
       const seen = seenIterations[n.id] ?? -1;
-      if (last > seen) out.add(n.id);
+      out[n.id] = n.messages.filter((m) => m.iteration > seen).length;
     }
     return out;
   }, [negs, seenIterations]);
@@ -362,9 +364,9 @@ export default function CommandCenter() {
 
         {negs && (
           <>
-            <Kanban byState={byState} onPick={handlePick} selectedId={selectedId} newIds={newIds} />
+            <Kanban byState={byState} onPick={handlePick} selectedId={selectedId} unreadByNegId={unreadByNegId} />
             {terminal.length > 0 && (
-              <TerminalSection negs={terminal} onPick={handlePick} selectedId={selectedId} newIds={newIds} />
+              <TerminalSection negs={terminal} onPick={handlePick} selectedId={selectedId} unreadByNegId={unreadByNegId} />
             )}
             {filteredOut.length > 0 && (
               <FilteredSection negs={filteredOut} />
@@ -594,12 +596,12 @@ function Kanban({
   byState,
   onPick,
   selectedId,
-  newIds,
+  unreadByNegId,
 }: {
   byState: Record<string, Negotiation[]>;
   onPick: (id: string) => void;
   selectedId: string | null;
-  newIds: ReadonlySet<string>;
+  unreadByNegId: Record<string, number>;
 }) {
   return (
     <div className="grid grid-cols-5 gap-3 items-start">
@@ -610,7 +612,7 @@ function Kanban({
           negs={byState[s] ?? []}
           onPick={onPick}
           selectedId={selectedId}
-          newIds={newIds}
+          unreadByNegId={unreadByNegId}
         />
       ))}
     </div>
@@ -622,13 +624,13 @@ function Column({
   negs,
   onPick,
   selectedId,
-  newIds,
+  unreadByNegId,
 }: {
   state: NegotiationState;
   negs: Negotiation[];
   onPick: (id: string) => void;
   selectedId: string | null;
-  newIds: ReadonlySet<string>;
+  unreadByNegId: Record<string, number>;
 }) {
   return (
     <div className="flex flex-col gap-2 min-h-[200px]">
@@ -643,7 +645,7 @@ function Column({
             n={n}
             onPick={onPick}
             selected={n.id === selectedId}
-            isNew={newIds.has(n.id)}
+            unread={unreadByNegId[n.id] ?? 0}
           />
         ))}
         {negs.length === 0 && (
@@ -658,12 +660,12 @@ function Card({
   n,
   onPick,
   selected,
-  isNew,
+  unread,
 }: {
   n: Negotiation;
   onPick: (id: string) => void;
   selected: boolean;
-  isNew: boolean;
+  unread: number;
 }) {
   const last = lastMessage(n);
   const recent = last ? last.iteration : null;
@@ -671,6 +673,8 @@ function Card({
     last?.sender === "tavi" ? "Tavi"
     : last?.sender === "vendor" ? "Vendor"
     : null;
+  const isNew = unread > 0;
+  const badgeLabel = unread > 9 ? "9+" : String(unread);
   return (
     <button
       onClick={() => onPick(n.id)}
@@ -684,12 +688,12 @@ function Card({
     >
       {isNew && !selected && (
         <span
-          className="absolute -top-1.5 -right-1.5 flex h-3 w-3"
-          aria-label="new message"
-          title="new message since you last opened this vendor"
+          className="absolute -top-1.5 -right-1.5 min-w-[1.25rem] h-5 px-1.5 flex items-center justify-center rounded-full bg-emerald-500 text-white text-[11px] font-semibold shadow-sm tabular-nums"
+          aria-label={`${unread} new message${unread === 1 ? "" : "s"}`}
+          title={`${unread} new message${unread === 1 ? "" : "s"} since you last opened this vendor`}
         >
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-          <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
+          <span className="absolute inset-0 rounded-full bg-emerald-400 opacity-60 animate-ping" aria-hidden="true" />
+          <span className="relative">{badgeLabel}</span>
         </span>
       )}
       <div className="flex items-center justify-between gap-2 mb-1">
@@ -737,12 +741,12 @@ function TerminalSection({
   negs,
   onPick,
   selectedId,
-  newIds,
+  unreadByNegId,
 }: {
   negs: Negotiation[];
   onPick: (id: string) => void;
   selectedId: string | null;
-  newIds: ReadonlySet<string>;
+  unreadByNegId: Record<string, number>;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -760,7 +764,7 @@ function TerminalSection({
             n={n}
             onPick={onPick}
             selected={n.id === selectedId}
-            isNew={newIds.has(n.id)}
+            unread={unreadByNegId[n.id] ?? 0}
           />
         ))}
       </div>

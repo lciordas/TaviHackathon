@@ -9,6 +9,8 @@ venv/
 
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 tavi.db
 
 .idea/

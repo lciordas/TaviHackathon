@@ -182,7 +182,10 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
                 vendor_name=mapping.get("display_name"),
                 detail=mapping.get("formatted_address"),
             )
-        db.flush()
+        # Commit (not flush) so the writer lock is released before the BBB
+        # loop's network I/O — otherwise the per-iteration _emit_event would
+        # contend with this transaction for the SQLite writer.
+        db.commit()
 
         # 4. Refetch cached vendor rows now that we've upserted.
         all_vendors = cache.get_vendors(db, candidate_ids)
@@ -238,7 +241,9 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
                 vendor_name=v.display_name,
                 detail=bbb_detail,
             )
-        db.flush()
+        # Phase boundary: commit BBB enrichment before scoring + ranking so
+        # the writer lock isn't held longer than necessary.
+        db.commit()
 
         _emit_event(
             work_order.id,

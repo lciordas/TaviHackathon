@@ -1,4 +1,4 @@
-.PHONY: help preflight check-node check-npm check-uv setup dev doctor backend frontend test clean
+.PHONY: help preflight check-node check-npm check-uv check-mailpit setup dev doctor backend frontend mailpit test clean
 
 NODE_MIN := 20
 NPM_MIN := 10
@@ -12,16 +12,19 @@ help:
 	@echo ""
 	@echo "  make setup     install deps, seed backend/.env, init SQLite"
 	@echo "  make doctor    validate Anthropic + Google Places credentials against the live APIs"
-	@echo "  make dev       run backend (:8000) and frontend (:3000) concurrently"
+	@echo "  make dev       run backend (:8000), frontend (:3000), and MailPit (:1025/:8025) concurrently"
 	@echo "  make backend   backend only (uvicorn --reload on :8000)"
 	@echo "  make frontend  frontend only (next dev on :3000)"
+	@echo "  make mailpit   MailPit only (SMTP :1025, UI :8025) — the Tavi ↔ vendor email bus"
 	@echo "  make test      backend tests (pytest, Anthropic stubbed)"
 	@echo "  make clean     remove deps, build output, and the local DB"
 	@echo ""
 	@echo "setup and dev both run a preflight that checks Node ≥ $(NODE_MIN) and"
 	@echo "npm ≥ $(NPM_MIN), auto-installs uv if missing, and auto-upgrades npm"
 	@echo "if it's too old. Node itself cannot be auto-upgraded — instructions"
-	@echo "are printed if your Node is too old."
+	@echo "are printed if your Node is too old. MailPit is optional but highly"
+	@echo "recommended — the backend falls back to a degraded direct-DB path if"
+	@echo "it's not running."
 
 check-node:
 	@if ! command -v node >/dev/null 2>&1; then \
@@ -92,7 +95,25 @@ check-uv:
 		echo "✓ uv $$(uv --version | awk '{print $$2}')"; \
 	fi
 
-preflight: check-node check-npm check-uv
+# MailPit is the local SMTP + HTTP inbox used by subpart 3's agentic
+# email bus. Soft requirement — if missing, print install guidance but
+# don't fail. The backend falls back to direct DB writes when MailPit is
+# unavailable, so the demo still works (just without visible emails).
+check-mailpit:
+	@if ! command -v mailpit >/dev/null 2>&1; then \
+		echo "warn: mailpit not found — subpart 3 will run in DB-only fallback mode."; \
+		echo ""; \
+		echo "Install (strongly recommended — lets you watch the Tavi ↔ vendor"; \
+		echo "email bus live in a browser at http://localhost:8025):"; \
+		echo "  - Homebrew (macOS / Linux):  brew install mailpit"; \
+		echo "  - Docker:                    docker run -d -p 8025:8025 -p 1025:1025 axllent/mailpit"; \
+		echo "  - Binary:                    https://mailpit.axllent.org/docs/install/"; \
+		echo ""; \
+	else \
+		echo "✓ mailpit installed ($$(which mailpit))"; \
+	fi
+
+preflight: check-node check-npm check-uv check-mailpit
 
 setup: preflight
 	@echo ""
@@ -125,11 +146,21 @@ dev: preflight
 		echo "error: GOOGLE_PLACES_API_KEY in backend/.env is empty. add a key."; exit 1; \
 	fi
 	@echo ""
-	@echo "→ starting backend on :8000 and frontend on :3000 — Ctrl-C to stop both"
-	@trap 'kill 0' INT TERM EXIT; \
-		(cd backend && uv run uvicorn app.main:app --reload --port 8000) & \
-		(cd frontend && npm run dev) & \
-		wait
+	@if command -v mailpit >/dev/null 2>&1; then \
+		echo "→ starting MailPit (:1025 SMTP, :8025 UI), backend (:8000), and frontend (:3000) — Ctrl-C to stop all"; \
+		trap 'kill 0' INT TERM EXIT; \
+			mailpit --quiet & \
+			(cd backend && uv run uvicorn app.main:app --reload --port 8000) & \
+			(cd frontend && npm run dev) & \
+			wait; \
+	else \
+		echo "warn: mailpit not on PATH — running backend + frontend only. Subpart 3 will use the DB-only fallback."; \
+		echo "→ starting backend on :8000 and frontend on :3000 — Ctrl-C to stop both"; \
+		trap 'kill 0' INT TERM EXIT; \
+			(cd backend && uv run uvicorn app.main:app --reload --port 8000) & \
+			(cd frontend && npm run dev) & \
+			wait; \
+	fi
 
 doctor:
 	@test -f backend/.env || { echo "error: backend/.env not found. run 'make setup' first."; exit 1; }
@@ -141,6 +172,14 @@ backend:
 
 frontend:
 	cd frontend && npm run dev
+
+mailpit:
+	@command -v mailpit >/dev/null 2>&1 || { \
+		echo "error: mailpit not installed."; \
+		echo "Install: brew install mailpit  (or see https://mailpit.axllent.org/docs/install/)"; \
+		exit 1; \
+	}
+	mailpit
 
 test:
 	cd backend && uv run pytest

@@ -12,6 +12,7 @@ Hackathon build. Three subparts in one repo: chat intake, live vendor discovery,
 - Python 3.11+ — `uv` will bootstrap this if missing.
 - `uv` — `make setup` will auto-install via the official script if it's not on your PATH.
 - npm version — `make setup` auto-upgrades via `npm install -g npm@latest` if your npm is older than v10.
+- **MailPit** (strongly recommended, but optional) — `brew install mailpit` or see [mailpit.axllent.org/docs/install/](https://mailpit.axllent.org/docs/install/). Used as the local email bus between Tavi and the simulated vendors in subpart 3 — lets you watch the full auction as real SMTP traffic at http://localhost:8025. If MailPit isn't installed, the backend falls back to a direct DB path (auction still works, but you can't inspect the emails visually). `make dev` starts it automatically when present.
 - API keys: Anthropic + Google Places (New). See [Getting API keys](#getting-api-keys) below.
 
 **Run it**
@@ -57,7 +58,7 @@ Typical cost for a full demo run (one work order, 12 vendors, ~10 scheduler tick
 
 1. **Intake** — chat with the facility-manager-facing agent at `/`. It extracts trade, service address (via Google Places autocomplete), scheduled date, budget, urgency, quality threshold, and license/insurance requirements. On confirm, the work order is persisted and discovery kicks off in the background.
 2. **Vendor discovery** — live Google Places search (~20mi radius, trade-aware strategy) + BBB scrape for grade/accreditation/complaints/tenure. Each vendor gets a cumulative objective score; hard filters remove out-of-hours and sub-threshold vendors.
-3. **Vendor auction** — per-work-order command center at `/work-orders/{id}`. Click **Tick** to advance the scheduler: Tavi pitches prospects, vendor-simulator agents reply (some ghost, some refuse, most engage), quotes land, the leaderboard re-ranks live, credentials get verified, the top-ranked vendor is booked and the rest auto-decline.
+3. **Vendor auction** — per-work-order command center at `/work-orders/{id}`. Click **Tick** to advance the scheduler: Tavi pitches prospects, vendor-simulator agents reply (some ghost, some refuse, most engage), quotes land, the leaderboard re-ranks live, credentials get verified, the top-ranked vendor is booked and the rest auto-decline. All traffic between Tavi and the vendors rides a real SMTP/IMAP-ish bus (MailPit) — open http://localhost:8025 in a second tab to see every message as it flies.
 
 Read-only DB explorer at `/admin` for debugging the raw state end-to-end.
 
@@ -67,6 +68,7 @@ Read-only DB explorer at `/admin` for debugging the raw state end-to-end.
 - **Frontend** — Next.js 16 / React 19 / TypeScript / Tailwind v4
 - **LLM** — Anthropic Claude (`anthropic` SDK, Sonnet 4.6 default)
 - **External APIs** — Google Places API (New), BBB.org scrape (`httpx` + `beautifulsoup4`)
+- **Email bus (subpart 3)** — MailPit (local SMTP on :1025, HTTP UI + API on :8025) sits between Tavi and the simulated vendors; optional but recommended
 
 ## Commands
 
@@ -74,9 +76,10 @@ Read-only DB explorer at `/admin` for debugging the raw state end-to-end.
 |---|---|
 | `make setup` | Install backend + frontend deps, seed `backend/.env`, init SQLite schema |
 | `make doctor` | Validate Anthropic + Google Places credentials against the live APIs |
-| `make dev` | Run backend (:8000) + frontend (:3000) concurrently |
+| `make dev` | Run backend (:8000), frontend (:3000), and MailPit (:1025 SMTP, :8025 UI) concurrently — MailPit is optional and skipped if not installed |
 | `make backend` | Backend only |
 | `make frontend` | Frontend only |
+| `make mailpit` | MailPit only (SMTP :1025, UI :8025) |
 | `make test` | Backend tests (~80 pytest cases; Anthropic stubbed — no API calls) |
 | `make clean` | Remove `.venv/`, `node_modules/`, `.next/`, and `tavi.db` |
 
@@ -99,7 +102,7 @@ Makefile                  dev commands
 
 ## Environment variables
 
-See [`backend/.env.example`](./backend/.env.example). Required: `ANTHROPIC_API_KEY`, `GOOGLE_PLACES_API_KEY`. Optional: `ANTHROPIC_MODEL`, `GOOGLE_PLACES_DEFAULT_RADIUS_M`, `CORS_ORIGINS`.
+See [`backend/.env.example`](./backend/.env.example). Required: `ANTHROPIC_API_KEY`, `GOOGLE_PLACES_API_KEY`. Optional: `ANTHROPIC_MODEL`, `GOOGLE_PLACES_DEFAULT_RADIUS_M`, `CORS_ORIGINS`, `MAILPIT_ENABLED` / `MAILPIT_SMTP_HOST` / `MAILPIT_SMTP_PORT` / `MAILPIT_API_BASE` / `TAVI_EMAIL_DOMAIN` (defaults land on the standard MailPit ports; override only if you're running MailPit non-standard or pointing at a remote host).
 
 ## Troubleshooting
 
@@ -109,6 +112,8 @@ See [`backend/.env.example`](./backend/.env.example). Required: `ANTHROPIC_API_K
 - **Anthropic 401 / 404 on model** — your key doesn't have access to `claude-sonnet-4-6`. Set `ANTHROPIC_MODEL` to a model your key supports.
 - **Port 8000 or 3000 already in use** — `lsof -i :8000` (or `:3000`) to see what's holding it. Kill it, or change the port in `Makefile` + frontend config.
 - **No vendors found** — discovery searches ~20 miles around the work-order address. Very rural addresses may come up empty; try an urban one.
+- **Vendor replies never appear in the kanban** — check MailPit is running (`curl http://localhost:8025/api/v1/info`). If MailPit is down, the backend logs `MailPit unavailable… falling back to DB only` on every send; restart MailPit or run `make dev` again to bring the bus back up.
+- **Port 1025 / 8025 already in use** — another SMTP server or MailPit instance is holding it. Stop the conflict (`lsof -i :1025`) or set `MAILPIT_SMTP_PORT` / `MAILPIT_API_BASE` in `backend/.env` to match whatever port MailPit is actually listening on.
 
 ## Testing
 

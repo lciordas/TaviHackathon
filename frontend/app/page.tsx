@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
@@ -149,6 +150,7 @@ function AssistantMarkdown({ content }: { content: string }) {
 }
 
 export default function Home() {
+  const router = useRouter();
   const [messages, setMessages] = useState<Message[]>([]);
   const [fields, setFields] = useState<Fields>({});
   const [input, setInput] = useState("");
@@ -344,6 +346,13 @@ export default function Home() {
       }
       const d: { id: string } = await r.json();
       setSubmittedId(d.id);
+      // Give the user a moment to see the green confirmation card, then
+      // auto-redirect to the command center. Discovery is running in the
+      // background there — the command-center page picks it up via its
+      // own poll + activity log.
+      window.setTimeout(() => {
+        router.push(`/work-orders/${d.id}`);
+      }, 1200);
     } catch (e: unknown) {
       setError(String(e));
     } finally {
@@ -401,7 +410,14 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="flex-1 mx-auto w-full max-w-6xl px-6 py-6 grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="border-b border-sky-200 bg-sky-50">
+        <div className="mx-auto max-w-6xl px-6 py-2.5 text-sm text-sky-900">
+          <span className="font-semibold">Demo tip:</span> open each page (Intake, DB Explorer, Command Center, Mailpit) in its own browser tab —
+          chat state isn&apos;t persisted, so navigating away and back resets the conversation.
+        </div>
+      </div>
+
+      <main className="flex-1 mx-auto w-full max-w-6xl px-6 py-6 grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
         <section className="md:col-span-2 flex flex-col bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           {/* Address autocomplete card */}
           <div className="border-b border-slate-200 bg-slate-50 p-4">

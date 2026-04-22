@@ -24,6 +24,7 @@ One repo, one project, three subparts — each developed in its own Claude Code 
 - External APIs:
   - **Google Places API (new)** — address autocomplete (intake) + nearby/text search + place details (discovery). Requires `GOOGLE_PLACES_API_KEY`.
   - **BBB (bbb.org)** — scraped via `httpx` + `beautifulsoup4` for grade, accreditation, complaint counts, years-in-business.
+  - **MailPit** — local SMTP + HTTP email bus between Tavi and the simulated vendors. Run separately (`mailpit` binary, SMTP on 1025, UI on 8025). Used only by subpart 3.
 - Deferred: Twilio, Resend, voice providers
 
 ## Architecture (shared across subparts)
@@ -218,6 +219,16 @@ All-vendors-queued, one-at-a-time. The rank-1 QUOTED neg is the "active pick"; e
    - Vendor reply → `quote_action=respond_to_confirmation` — coordinator calls `accept_quote` (→ SCHEDULED + cascade-decline peers) or `decline_quote`.
    - Silence ≥ `CONFIRMATION_TIMEOUT_TICKS` → force-decline; next rank takes over.
 
+### Email bus — MailPit (`mailpit.py` + `inbound.py`)
+
+Tavi ↔ vendor communication rides on a real email bus. MailPit catches all mail locally (SMTP 1025, HTTP API 8025).
+
+- **Tavi outbound** (`tools._send` → `mailpit.send_tavi_to_vendor`): every `send_email` tool call SMTP-sends to MailPit `From: tavi+{work_order_id}@tavi.local` `To: {vendor.email}`. DB write happens alongside (DB remains the canonical thread for the UI).
+- **Vendor outbound** (`simulator.run_turn` → `mailpit.send_vendor_to_tavi`): simulator SMTP-sends the reply; does NOT write to DB.
+- **Simulator's thread view** (`mailpit.fetch_vendor_thread`): pulled via MailPit's HTTP search API using `addressed:{vendor_email}` (matches both to and from). The simulator has no direct DB access — its entire view of the negotiation comes through MailPit.
+- **Inbound sweep** (`inbound.sweep`, end of each tick): polls MailPit for unread messages to `tavi+{work_order_id}@...`, matches From address to a `Vendor.email`, writes each as a `NegotiationMessage` with `sender=VENDOR`, and marks the MailPit message read.
+- **Fallback**: if MailPit is down, coordinator writes DB directly (no SMTP), simulator reads/writes DB directly (legacy path). Negotiation still progresses; inbound sweep is a no-op.
+
 ### Pitch-template caching (`pitch.py`)
 
 One Anthropic call per work order generates a shared opening pitch with `{{vendor_name}}` placeholder, cached on `WorkOrder.pitch_template` (JSON `{subject, body}`). Every subsequent vendor's PROSPECTING turn skips the coordinator LLM loop, substitutes the vendor name, and dispatches `send_email` directly — ~87% fewer opening Anthropic calls on a 12-vendor run.
@@ -264,6 +275,8 @@ The command center at `/work-orders/[id]` is the live, interactive view — admi
 - Initialize SQLite schema: `uv run python create_db.py`
 - Run server: `uv run uvicorn app.main:app --reload --port 8000`
 - Interactive chat REPL (talks to the running server): `uv run python chat.py`
+- Start MailPit (subpart 3 email bus; separate terminal): `mailpit`
+  — SMTP on `localhost:1025`, UI + HTTP API on `http://localhost:8025`. If MailPit isn't running, the negotiation subsystem falls back to direct DB writes and a warning in the backend logs.
 - Unit tests: `uv run pytest` — ~80 tests across: hours-overlap edge cases (cross-midnight / 24/7 / missing hours), scoring math (Bayesian anchor, urgency weight profiles, BBB-missing reweight, quote-aware subjective ranking), BBB HTML parser fixtures, coordinator tool dispatchers (state guards, attribute merges), pitch-template substitution, and the full scheduler flow (turn resolution, ghoster + refusal rolls, silence/confirmation/verification timeouts, sequential booking flow, cascade decline, readiness monotonicity). Stubs the LLM agents; no Anthropic calls during `pytest`
 
 ### Frontend (`frontend/`)
@@ -280,3 +293,8 @@ The command center at `/work-orders/[id]` is the live, interactive view — admi
 - `CORS_ORIGINS` — JSON array, defaults to `["http://localhost:3000"]`
 - `GOOGLE_PLACES_API_KEY` — required for `/intake/places/*` and `/discovery/run`
 - `GOOGLE_PLACES_DEFAULT_RADIUS_M` — defaults to 32186 (~20mi)
+- `MAILPIT_ENABLED` — defaults to true; set false to disable the email bus entirely
+- `MAILPIT_SMTP_HOST` — defaults to `localhost`
+- `MAILPIT_SMTP_PORT` — defaults to `1025`
+- `MAILPIT_API_BASE` — defaults to `http://localhost:8025`
+- `TAVI_EMAIL_DOMAIN` — defaults to `tavi.local` (used for `tavi+{wo_id}@{domain}` plus-addressing)

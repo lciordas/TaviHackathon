@@ -15,8 +15,8 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from ...enums import MessageChannel, MessageSender, NegotiationState
-from ...models import Negotiation
-from . import messages
+from ...models import Negotiation, Vendor
+from . import mailpit, messages
 from .readiness import refresh_ready_to_schedule
 
 logger = logging.getLogger(__name__)
@@ -250,6 +250,26 @@ def _send(
     text = str(content.get("text") or "")
     if not text.strip():
         return ToolOutcome(f"send_{channel.value}", False, "empty message body")
+
+    # For email on the Tavi → vendor direction, also push the message into
+    # MailPit so the vendor simulator can read it out of the shared bus. DB
+    # remains the canonical thread regardless of whether MailPit is up.
+    if channel == MessageChannel.EMAIL:
+        vendor = db.get(Vendor, neg.vendor_place_id)
+        if vendor and vendor.email:
+            try:
+                mailpit.send_tavi_to_vendor(
+                    work_order_id=neg.work_order_id,
+                    vendor_email=vendor.email,
+                    subject=str(content.get("subject") or ""),
+                    body=text,
+                )
+            except mailpit.MailpitUnavailable as e:
+                logger.info(
+                    "MailPit unavailable for Tavi→vendor send (neg=%s): %s; falling back to DB only",
+                    neg.id, e,
+                )
+
     msg = messages.append_message(
         db, neg,
         sender=MessageSender.TAVI, channel=channel, iteration=iteration,

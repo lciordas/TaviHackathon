@@ -18,5 +18,13 @@ class Settings(BaseSettings):
     bbb_user_agent: str = "TaviBot/0.1 (hackathon research)"
     bbb_request_delay_s: float = 1.0
 
+    # MailPit — local email bus. Tavi sends via SMTP; vendor simulators
+    # read via the HTTP API. See CLAUDE.md for the runtime setup.
+    mailpit_enabled: bool = True
+    mailpit_smtp_host: str = "localhost"
+    mailpit_smtp_port: int = 1025
+    mailpit_api_base: str = "http://localhost:8025"
+    tavi_email_domain: str = "tavi.local"  # Tavi = tavi+{work_order_id}@{domain}
+
 
 settings = Settings()

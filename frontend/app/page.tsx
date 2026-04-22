@@ -21,6 +21,14 @@ type ChatResponse = {
   missing: string[];
 };
 
+type Scenario = {
+  id: string;
+  trade: string | null;
+  urgency: string | null;
+  city: string | null;
+  message: string;
+};
+
 type Suggestion = {
   place_id: string;
   primary_text: string;
@@ -158,6 +166,9 @@ export default function Home() {
   const [selectedAddress, setSelectedAddress] = useState<SelectedAddress | null>(null);
   const [hintApplied, setHintApplied] = useState(false);
 
+  // Pre-built demo scenarios from requests.json. Fetched once on mount.
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+
   // Derived, always-fresh: do we have every required field? Recomputes on
   // every fields change (including address pick), so the Submit button
   // appears immediately without needing another chat turn.
@@ -180,6 +191,16 @@ export default function Home() {
       })
       .catch((e: unknown) => {
         setError(`Can't reach backend at ${API_BASE}. Is uvicorn running? (${String(e)})`);
+      });
+  }, []);
+
+  // Pull the pre-built demo scenarios. Silent failure: panel just won't render.
+  useEffect(() => {
+    fetch(`${API_BASE}/intake/scenarios`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d: Scenario[]) => setScenarios(Array.isArray(d) ? d : []))
+      .catch(() => {
+        /* scenario panel simply hides */
       });
   }, []);
 
@@ -344,6 +365,16 @@ export default function Home() {
       return;
     }
 
+    void callChat(next);
+  }
+
+  // Fire a pre-built scenario message as if the user typed and sent it.
+  function useScenario(message: string) {
+    if (pending || submittedId) return;
+    const text = message.trim();
+    if (!text) return;
+    const next: Message[] = [...messages, { role: "user", content: text }];
+    setMessages(next);
     void callChat(next);
   }
 
@@ -521,27 +552,62 @@ export default function Home() {
           </form>
         </section>
 
-        <aside className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 h-fit">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold text-slate-900">Captured fields</h2>
-            {isReady && !submittedId && (
-              <span className="text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
-                Ready
-              </span>
+        <aside className="flex flex-col gap-4 h-fit">
+          {scenarios.length > 0 && !submittedId && (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
+              <h2 className="text-sm font-semibold text-slate-900 mb-1">
+                Choose a scenario
+              </h2>
+              <p className="text-xs text-slate-500 mb-3">
+                Click one to fire it as your first message, or type your own below.
+              </p>
+              <div className="space-y-1.5 max-h-[24rem] overflow-y-auto pr-1">
+                {scenarios.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => useScenario(s.message)}
+                    disabled={pending || !!submittedId}
+                    className="block w-full text-left rounded-md border border-slate-200 hover:border-slate-400 hover:bg-slate-50 p-2.5 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-slate-500 mb-1 flex-wrap">
+                      {s.trade && <span>{s.trade.replace(/_/g, " ")}</span>}
+                      {s.trade && s.urgency && <span aria-hidden>·</span>}
+                      {s.urgency && <span>{s.urgency}</span>}
+                      {(s.trade || s.urgency) && s.city && <span aria-hidden>·</span>}
+                      {s.city && <span>{s.city}</span>}
+                    </div>
+                    <div className="text-slate-700 line-clamp-2 leading-snug">
+                      {s.message}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-slate-900">Captured fields</h2>
+              {isReady && !submittedId && (
+                <span className="text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                  Ready
+                </span>
+              )}
+            </div>
+            {nonNullFields.length === 0 ? (
+              <p className="text-sm text-slate-400">Nothing captured yet.</p>
+            ) : (
+              <dl className="space-y-3">
+                {nonNullFields.map(([k, v]) => (
+                  <div key={k} className="text-sm">
+                    <dt className="text-xs uppercase tracking-wide text-slate-500">{FIELD_LABELS[k] ?? k}</dt>
+                    <dd className="text-slate-900 break-words mt-0.5">{formatValue(k, v)}</dd>
+                  </div>
+                ))}
+              </dl>
             )}
           </div>
-          {nonNullFields.length === 0 ? (
-            <p className="text-sm text-slate-400">Nothing captured yet.</p>
-          ) : (
-            <dl className="space-y-3">
-              {nonNullFields.map(([k, v]) => (
-                <div key={k} className="text-sm">
-                  <dt className="text-xs uppercase tracking-wide text-slate-500">{FIELD_LABELS[k] ?? k}</dt>
-                  <dd className="text-slate-900 break-words mt-0.5">{formatValue(k, v)}</dd>
-                </div>
-              ))}
-            </dl>
-          )}
         </aside>
       </main>
     </div>

@@ -88,6 +88,20 @@ class IntakeConfirmRequest(BaseModel):
     fields: WorkOrderPartial
 
 
+class IntakeScenario(BaseModel):
+    """Pre-built demo scenario sourced from vendor-discovery/data/seed/requests.json.
+
+    Used by the intake UI to let a demoer fire a realistic facility-manager
+    message with one click instead of typing it out.
+    """
+
+    id: str
+    trade: Optional[str] = None
+    urgency: Optional[str] = None
+    city: Optional[str] = None
+    message: str
+
+
 class WorkOrderRead(BaseModel):
     """Shape returned after a WorkOrder is persisted."""
 

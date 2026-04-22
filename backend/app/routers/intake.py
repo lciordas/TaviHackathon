@@ -1,6 +1,8 @@
 """Intake API routes."""
 
+import json
 import logging
+from pathlib import Path
 
 from anthropic import APIError
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -12,6 +14,7 @@ from ..prompts import GREETING
 from ..schemas import (
     IntakeConfirmRequest,
     IntakeConfirmResponse,
+    IntakeScenario,
     IntakeStartResponse,
     IntakeTurnRequest,
     IntakeTurnResponse,
@@ -25,10 +28,53 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# backend/app/routers/intake.py → parents[3] = repo root
+_SCENARIOS_FILE = (
+    Path(__file__).resolve().parents[3]
+    / "vendor-discovery"
+    / "data"
+    / "seed"
+    / "requests.json"
+)
+
 
 @router.post("/start", response_model=IntakeStartResponse)
 def start() -> IntakeStartResponse:
     return IntakeStartResponse(greeting=GREETING, fields=WorkOrderPartial())
+
+
+@router.get("/scenarios", response_model=list[IntakeScenario])
+def scenarios() -> list[IntakeScenario]:
+    """Pre-built demo scenarios from requests.json for one-click intake.
+
+    Empty list if the seed file is absent (e.g., fresh clone without the
+    vendor-discovery subtree) — the frontend just hides the panel in that case.
+    """
+    if not _SCENARIOS_FILE.exists():
+        return []
+    try:
+        with open(_SCENARIOS_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("couldn't parse scenarios file %s: %s", _SCENARIOS_FILE, exc)
+        return []
+
+    out: list[IntakeScenario] = []
+    for req in data.get("requests", []):
+        message = (req.get("chat") or {}).get("message")
+        if not message:
+            continue
+        wo = req.get("work_order") or {}
+        out.append(
+            IntakeScenario(
+                id=req.get("request_id") or f"req_{len(out)+1}",
+                trade=wo.get("trade"),
+                urgency=wo.get("urgency"),
+                city=wo.get("city"),
+                message=message,
+            )
+        )
+    return out
 
 
 @router.post("/chat", response_model=IntakeTurnResponse)

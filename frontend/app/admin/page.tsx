@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+
+import { Nav } from "@/components/Nav";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
@@ -280,7 +281,7 @@ export default function Admin() {
             <h1 className="text-xl font-semibold tracking-tight">Tavi — DB Explorer</h1>
             <p className="text-xs text-slate-500">Read-only view of <code className="font-mono">backend/tavi.db</code></p>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <button
               onClick={refresh}
               disabled={loading}
@@ -288,12 +289,7 @@ export default function Admin() {
             >
               {loading ? "Loading…" : "Refresh"}
             </button>
-            <Link
-              href="/"
-              className="text-sm text-slate-600 hover:text-slate-900 underline"
-            >
-              ← Intake
-            </Link>
+            <Nav />
           </div>
         </div>
 

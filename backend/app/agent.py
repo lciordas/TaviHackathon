@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _client = Anthropic(api_key=settings.anthropic_api_key)
 
-_MAX_ITERATIONS = 3
+_MAX_ITERATIONS = 5
 
 
 def run_turn(
@@ -64,40 +64,43 @@ def run_turn(
             messages=api_messages,
         )
 
-        if resp.stop_reason == "tool_use":
-            api_messages.append({"role": "assistant", "content": resp.content})
-            tool_results: list[dict] = []
-            for block in resp.content:
-                if block.type != "tool_use":
-                    continue
-                if block.name == "update_fields":
-                    try:
-                        patch = WorkOrderPartial.model_validate(block.input)
-                        accumulated = accumulated.merge(patch)
-                    except ValidationError as exc:
-                        logger.warning(
-                            "update_fields rejected: %s (input=%s)",
-                            exc,
-                            block.input,
-                        )
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": "ok",
-                    }
-                )
-            api_messages.append({"role": "user", "content": tool_results})
-            continue
-
+        # Always harvest text from the response — tool-use responses can
+        # include preamble text, and we want whatever text landed last to
+        # be the user-facing reply. This avoids the empty-reply fallback
+        # when the model loops on tool calls without a final text block.
         for block in resp.content:
-            if block.type == "text":
+            if block.type == "text" and block.text.strip():
                 reply_text = block.text
-                break
-        break
+
+        if resp.stop_reason != "tool_use":
+            break
+
+        api_messages.append({"role": "assistant", "content": resp.content})
+        tool_results: list[dict] = []
+        for block in resp.content:
+            if block.type != "tool_use":
+                continue
+            if block.name == "update_fields":
+                try:
+                    patch = WorkOrderPartial.model_validate(block.input)
+                    accumulated = accumulated.merge(patch)
+                except ValidationError as exc:
+                    logger.warning(
+                        "update_fields rejected: %s (input=%s)",
+                        exc,
+                        block.input,
+                    )
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": "ok",
+                }
+            )
+        api_messages.append({"role": "user", "content": tool_results})
 
     if not reply_text:
-        reply_text = "Sorry, I missed that — could you say it again?"
+        reply_text = "Got it — what else?"
 
     missing = [f for f in REQUIRED_FIELDS if getattr(accumulated, f) is None]
     is_ready = not missing

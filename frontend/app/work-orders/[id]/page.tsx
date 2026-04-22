@@ -337,7 +337,14 @@ export default function CommandCenter() {
       </header>
 
       <main className="flex-1 mx-auto w-full max-w-[1400px] px-6 py-6 flex flex-col gap-4">
-        {wo && <WorkOrderHeader wo={wo} onTick={onTick} ticking={ticking} />}
+        {wo && (
+          <WorkOrderHeader
+            wo={wo}
+            onTick={onTick}
+            ticking={ticking}
+            auctionClosed={(negs ?? []).some((n) => n.state === "scheduled")}
+          />
+        )}
 
         <ActivityLog log={activityLog} />
 
@@ -379,10 +386,12 @@ function WorkOrderHeader({
   wo,
   onTick,
   ticking,
+  auctionClosed,
 }: {
   wo: WorkOrder;
   onTick: () => void;
   ticking: boolean;
+  auctionClosed: boolean;
 }) {
   return (
     <div className="bg-white border border-slate-200 rounded-xl shadow-sm">
@@ -420,10 +429,15 @@ function WorkOrderHeader({
           </div>
           <button
             onClick={onTick}
-            disabled={ticking}
+            disabled={ticking || auctionClosed}
+            title={auctionClosed ? "A vendor is booked — auction closed" : undefined}
             className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed flex items-center gap-2"
           >
-            {ticking ? "Ticking…" : (<><span>Tick</span><span aria-hidden>⏩</span></>)}
+            {auctionClosed
+              ? (<><span>Booked</span><span aria-hidden>✓</span></>)
+              : ticking
+              ? "Ticking…"
+              : (<><span>Tick</span><span aria-hidden>⏩</span></>)}
           </button>
         </div>
       </div>

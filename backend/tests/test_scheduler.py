@@ -107,7 +107,6 @@ def _make_work_order(db: Session, **kwargs) -> WorkOrder:
         quality_threshold=4.0,
         requires_licensed=True,
         requires_insured=True,
-        email="fm@example.com",
     )
     defaults.update(kwargs)
     wo = WorkOrder(**defaults)

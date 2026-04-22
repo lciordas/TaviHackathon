@@ -36,7 +36,6 @@ def _seed(db: Session, state: NegotiationState = NegotiationState.PROSPECTING) -
         lat=32.78, lng=-96.80, urgency=Urgency.SCHEDULED,
         scheduled_for=datetime(2026, 4, 25, tzinfo=timezone.utc),
         budget_cap_cents=50000, quality_threshold=4.0,
-        email="fm@example.com",
     )
     db.add(wo); db.flush()
     v = Vendor(place_id="p1", display_name="Ace", lat=32.78, lng=-96.80, types=[])

@@ -41,7 +41,7 @@ from ...enums import (
 from ...models import Negotiation, Vendor, WorkOrder
 from ..discovery import scoring
 from ..personas import skip_probability_for
-from . import coordinator, messages, simulator
+from . import coordinator, inbound, messages, simulator
 from .readiness import refresh_ready_to_schedule
 
 
@@ -166,9 +166,15 @@ def tick(db: Session, work_order_id: str) -> TickResult:
         # stream of updates.
         db.commit()
 
+    # End-of-tick MailPit sweep: any vendor replies that landed during this
+    # tick get pulled into `negotiation_messages` so the command center +
+    # the next tick's dispatch can see them. Idempotent; MailPit-down = no-op.
+    inbound.sweep(db, work_order_id, iteration)
+
     # If anyone became SCHEDULED this tick, the auction is over — decline the
-    # remaining QUOTED peers. Safe to run every tick (idempotent).
-    _cascade_decline_on_scheduled(negs)
+    # remaining QUOTED peers and send each a short "we went with another
+    # vendor" email. Safe to run every tick (idempotent).
+    _cascade_decline_on_scheduled(db, negs, iteration)
 
     # End-of-tick sweep: recompute the readiness flag. Redundant with the
     # per-tool-call check but catches direct state mutations (timeouts).
@@ -619,8 +625,21 @@ def _active_pick_id(work_order: WorkOrder, negotiations: list[Negotiation]) -> O
     return candidates[0].id
 
 
-def _cascade_decline_on_scheduled(negotiations: list[Negotiation]) -> None:
-    """If any neg is SCHEDULED, auto-decline remaining QUOTED peers.
+_CASCADE_DECLINE_SUBJECT = "Update — we've booked another vendor"
+_CASCADE_DECLINE_BODY = (
+    "Thanks for the quote on this job. We've decided to move forward with "
+    "another vendor this time. We really appreciate your time and we'll "
+    "keep you in mind for future opportunities."
+)
+
+
+def _cascade_decline_on_scheduled(
+    db: Session,
+    negotiations: list[Negotiation],
+    iteration: int,
+) -> None:
+    """If any neg is SCHEDULED, auto-decline remaining QUOTED peers and
+    notify each one with a short decline email.
 
     Idempotent: if there's no SCHEDULED neg, no-op. If there are no QUOTED
     negs left, no-op. Call at end of each tick.
@@ -628,8 +647,23 @@ def _cascade_decline_on_scheduled(negotiations: list[Negotiation]) -> None:
     if not any(n.state == NegotiationState.SCHEDULED for n in negotiations):
         return
     for n in negotiations:
-        if n.state == NegotiationState.QUOTED:
-            _force_decline(n, reason="another vendor was booked")
+        if n.state != NegotiationState.QUOTED:
+            continue
+        # Send the "thanks but no thanks" note BEFORE flipping state so the
+        # message reads as an in-negotiation outbound, not a post-terminal
+        # stray write.
+        messages.append_message(
+            db,
+            n,
+            sender=MessageSender.TAVI,
+            channel=MessageChannel.EMAIL,
+            iteration=iteration,
+            content={
+                "subject": _CASCADE_DECLINE_SUBJECT,
+                "text": _CASCADE_DECLINE_BODY,
+            },
+        )
+        _force_decline(n, reason="another vendor was booked")
 
 
 def _refresh_quoted_ranks(

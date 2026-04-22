@@ -84,12 +84,23 @@ type TickResponse = {
   events: TickEvent[];
 };
 
-// One row in the running activity log, accumulated across ticks.
+// One row in the running activity log.
+// tick === 0 signals a pre-auction discovery event; > 0 is a scheduler tick.
 type LogEntry = {
   id: string;
   tick: number;
   vendorName: string;
   outcome: string;
+  detail?: string;
+};
+
+type DiscoveryEvent = {
+  id: string;
+  work_order_id: string;
+  created_at: string;
+  kind: string;
+  vendor_name: string | null;
+  detail: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -159,6 +170,17 @@ function lastMessage(n: Negotiation): NegotiationMessage | null {
   return n.messages[n.messages.length - 1];
 }
 
+// Small ring spinner that inherits its stroke from the parent's text color.
+function Spinner({ size = 14 }: { size?: number }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{ width: size, height: size }}
+      className="inline-block border-2 border-current border-t-transparent rounded-full animate-spin"
+    />
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -184,6 +206,10 @@ export default function CommandCenter() {
 
   // Running activity log across ticks. Prepend so newest is on top.
   const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
+  // IDs of discovery events we've already queued for the log — lets the
+  // refresh poll dedup across firings even while setTimeouts are still
+  // in flight (activityLog state lags the queue).
+  const seenDiscoveryIds = useRef<Set<string>>(new Set());
 
   // Effect does the fetch async; setState only runs after the fetch resolves,
   // which keeps react-hooks/set-state-in-effect happy.
@@ -222,16 +248,37 @@ export default function CommandCenter() {
 
   const refresh = useCallback(async () => {
     try {
-      const [w, ns] = await Promise.all([
+      const [w, ns, events] = await Promise.all([
         fetch(`${API_BASE}/negotiations/work_order/${workOrderId}`).then((r) => {
           if (!r.ok) throw new Error(`work_order ${r.status}`); return r.json() as Promise<WorkOrder>;
         }),
         fetch(`${API_BASE}/negotiations/by_work_order/${workOrderId}`).then((r) => {
           if (!r.ok) throw new Error(`negotiations ${r.status}`); return r.json() as Promise<Negotiation[]>;
         }),
+        fetch(`${API_BASE}/discovery/events/by_work_order/${workOrderId}`)
+          .then((r) => (r.ok ? (r.json() as Promise<DiscoveryEvent[]>) : []))
+          .catch(() => [] as DiscoveryEvent[]),
       ]);
       setWo(w);
       setNegs(ns);
+      // Stream newly-arrived discovery events into the log one at a time,
+      // even when the poll returns a batch — keeps the ticker feeling alive
+      // instead of dumping 5 rows at once. Dedup via the ref so re-polls
+      // don't re-queue events already scheduled.
+      const fresh = events.filter((e) => !seenDiscoveryIds.current.has(e.id));
+      fresh.forEach((e) => seenDiscoveryIds.current.add(e.id));
+      fresh.forEach((e, idx) => {
+        const entry: LogEntry = {
+          id: e.id,
+          tick: 0,
+          vendorName: e.vendor_name ?? "—",
+          outcome: e.kind,
+          detail: e.detail ?? undefined,
+        };
+        window.setTimeout(() => {
+          setActivityLog((prev) => [entry, ...prev].slice(0, 300));
+        }, idx * 180);
+      });
     } catch (e) {
       setError(`Load failed: ${String(e)}`);
     }
@@ -378,7 +425,10 @@ export default function CommandCenter() {
 
         {negs && negs.length === 0 && (
           <div className="bg-white border border-slate-200 rounded-xl p-6 flex items-center gap-4">
-            <span className="inline-block h-2 w-2 rounded-full bg-sky-500 animate-pulse" aria-hidden="true" />
+            <span
+              aria-hidden="true"
+              className="inline-block h-6 w-6 border-[3px] border-sky-500 border-t-transparent rounded-full animate-spin shrink-0"
+            />
             <div>
               <div className="text-sm font-medium text-slate-900">
                 Vendor discovery in progress
@@ -471,13 +521,27 @@ function WorkOrderHeader({
             }
             className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed flex items-center gap-2"
           >
-            {auctionClosed
-              ? (<><span>Booked</span><span aria-hidden>✓</span></>)
-              : discoveryPending
-              ? (<><span>Discovering…</span><span aria-hidden>⏳</span></>)
-              : ticking
-              ? "Ticking…"
-              : (<><span>Tick</span><span aria-hidden>⏩</span></>)}
+            {auctionClosed ? (
+              <>
+                <span>Booked</span>
+                <span aria-hidden>✓</span>
+              </>
+            ) : discoveryPending ? (
+              <>
+                <span>Discovering…</span>
+                <Spinner />
+              </>
+            ) : ticking ? (
+              <>
+                <span>Ticking…</span>
+                <Spinner />
+              </>
+            ) : (
+              <>
+                <span>Tick</span>
+                <span aria-hidden>⏩</span>
+              </>
+            )}
           </button>
         </div>
       </div>
@@ -494,6 +558,7 @@ function humanizeOutcome(outcome: string): string {
 }
 
 const OUTCOME_COLOR: Record<string, string> = {
+  // Scheduler tick outcomes
   message_sent: "bg-sky-50 text-sky-800 border-sky-200",
   verification_requested: "bg-sky-50 text-sky-800 border-sky-200",
   verification_progress: "bg-sky-50 text-sky-800 border-sky-200",
@@ -506,16 +571,17 @@ const OUTCOME_COLOR: Record<string, string> = {
   skipped: "bg-slate-50 text-slate-600 border-slate-200",
   waiting: "bg-slate-50 text-slate-600 border-slate-200",
   queued: "bg-slate-50 text-slate-600 border-slate-200",
+  // Discovery events (tick === 0 in LogEntry)
+  search_start: "bg-violet-50 text-violet-800 border-violet-200",
+  candidates: "bg-violet-50 text-violet-800 border-violet-200",
+  place_details: "bg-emerald-50 text-emerald-800 border-emerald-200",
+  place_cached: "bg-slate-50 text-slate-600 border-slate-200",
+  bbb_scrape: "bg-amber-50 text-amber-800 border-amber-200",
+  scoring: "bg-indigo-50 text-indigo-800 border-indigo-200",
+  done: "bg-emerald-50 text-emerald-900 border-emerald-300",
 };
 
 function ActivityLog({ log }: { log: LogEntry[] }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Keep the top-of-list visible when new entries prepend (newest at top).
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = 0;
-  }, [log]);
-
   return (
     <div className="bg-white border border-slate-200 rounded-xl shadow-sm">
       <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-between">
@@ -526,10 +592,15 @@ function ActivityLog({ log }: { log: LogEntry[] }) {
           {log.length} event{log.length === 1 ? "" : "s"}
         </div>
       </div>
-      <div
-        ref={scrollRef}
-        className="max-h-32 overflow-y-auto px-4 py-2 text-xs space-y-1"
-      >
+      {/* Fixed-height ticker — shows only the top ~5 rows. Older rows stay
+          in the DOM but clip below the fold; the user can't scroll, so
+          the log always looks fresh and active. */}
+      <div className="h-32 overflow-hidden px-4 py-2 text-xs space-y-1 relative">
+        {/* Soft fade at the bottom so the clipped row doesn't feel abrupt. */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-white to-transparent"
+        />
         {log.length === 0 ? (
           <div className="text-slate-400 italic py-1">
             No events yet. Tick the work order to advance the negotiation.
@@ -537,17 +608,26 @@ function ActivityLog({ log }: { log: LogEntry[] }) {
         ) : (
           log.map((e) => {
             const color = OUTCOME_COLOR[e.outcome] ?? "bg-slate-50 text-slate-700 border-slate-200";
+            const label = e.tick > 0 ? `t${e.tick}` : "disc";
             return (
-              <div key={e.id} className="flex items-center gap-2">
+              <div
+                key={e.id}
+                className="activity-entry-pop flex items-center gap-2 rounded px-1.5 -mx-1.5 py-0.5"
+              >
                 <span className="font-mono text-slate-400 tabular-nums w-10 shrink-0">
-                  t{e.tick}
+                  {label}
                 </span>
-                <span className="font-medium text-slate-800 truncate max-w-[16rem]">
+                <span className="font-medium text-slate-800 truncate max-w-[14rem] shrink-0">
                   {e.vendorName}
                 </span>
-                <span className={`px-1.5 py-0.5 rounded border text-[10px] ${color}`}>
+                <span className={`px-1.5 py-0.5 rounded border text-[10px] shrink-0 ${color}`}>
                   {humanizeOutcome(e.outcome)}
                 </span>
+                {e.detail && (
+                  <span className="text-slate-500 text-[11px] truncate">
+                    {e.detail}
+                  </span>
+                )}
               </div>
             );
           })

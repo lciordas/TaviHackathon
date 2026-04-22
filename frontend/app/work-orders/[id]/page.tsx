@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+
+import { Nav } from "@/components/Nav";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
@@ -81,6 +82,14 @@ type TickResponse = {
   work_order_id: string;
   iteration: number;
   events: TickEvent[];
+};
+
+// One row in the running activity log, accumulated across ticks.
+type LogEntry = {
+  id: string;
+  tick: number;
+  vendorName: string;
+  outcome: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -165,6 +174,17 @@ export default function CommandCenter() {
   const [lastTick, setLastTick] = useState<TickResponse | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  // Per-negotiation "last message iteration the user has seen". Initialized
+  // from the latest iteration in each neg's thread the first time negs load,
+  // so nothing shows as new on initial page view. After a tick adds messages,
+  // cards with iterations beyond what's here render a "new" dot until the
+  // user opens them.
+  const [seenIterations, setSeenIterations] = useState<Record<string, number>>({});
+  const initializedSeen = useRef(false);
+
+  // Running activity log across ticks. Prepend so newest is on top.
+  const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
+
   // Effect does the fetch async; setState only runs after the fetch resolves,
   // which keeps react-hooks/set-state-in-effect happy.
   useEffect(() => {
@@ -184,6 +204,21 @@ export default function CommandCenter() {
     })();
     return () => ac.abort();
   }, [workOrderId]);
+
+  // Initialize "seen" cursors to each neg's current latest iteration the
+  // first time negs arrive, so the initial page view never flags anything
+  // as new. After this, new messages from future ticks will exceed the
+  // stored cursor and render the "new" dot on cards until clicked.
+  useEffect(() => {
+    if (initializedSeen.current || !negs) return;
+    const init: Record<string, number> = {};
+    for (const n of negs) {
+      const last = n.messages.length ? n.messages[n.messages.length - 1].iteration : 0;
+      init[n.id] = last;
+    }
+    setSeenIterations(init);
+    initializedSeen.current = true;
+  }, [negs]);
 
   const refresh = useCallback(async () => {
     try {
@@ -223,6 +258,16 @@ export default function CommandCenter() {
       if (!r.ok) throw new Error(`tick ${r.status}`);
       const payload = (await r.json()) as TickResponse;
       setLastTick(payload);
+      // Accumulate events in the activity log, newest first.
+      setActivityLog((prev) => {
+        const additions: LogEntry[] = payload.events.map((ev, i) => ({
+          id: `${payload.iteration}-${i}-${ev.negotiation_id}`,
+          tick: payload.iteration,
+          vendorName: ev.vendor_display_name ?? "—",
+          outcome: ev.outcome,
+        }));
+        return [...additions.reverse(), ...prev].slice(0, 200);
+      });
     } catch (e) {
       setError(`Tick failed: ${String(e)}`);
     } finally {
@@ -257,22 +302,44 @@ export default function CommandCenter() {
     [negs, selectedId],
   );
 
+  // Negotiation IDs with messages past the user's "seen" cursor — show a dot.
+  const newIds = useMemo(() => {
+    const out = new Set<string>();
+    if (!negs) return out;
+    for (const n of negs) {
+      if (!n.messages.length) continue;
+      const last = n.messages[n.messages.length - 1].iteration;
+      const seen = seenIterations[n.id] ?? -1;
+      if (last > seen) out.add(n.id);
+    }
+    return out;
+  }, [negs, seenIterations]);
+
+  // Opening a negotiation marks its thread as read.
+  const handlePick = useCallback((negId: string) => {
+    setSelectedId(negId);
+    const n = negs?.find((x) => x.id === negId);
+    if (!n) return;
+    const last = n.messages.length ? n.messages[n.messages.length - 1].iteration : 0;
+    setSeenIterations((prev) => ({
+      ...prev,
+      [negId]: Math.max(prev[negId] ?? 0, last),
+    }));
+  }, [negs]);
+
   return (
     <div className="flex-1 flex flex-col bg-slate-50 text-slate-900 min-h-screen">
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto max-w-[1400px] px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-sm text-slate-600 hover:text-slate-900">← Intake</Link>
-            <h1 className="text-xl font-semibold tracking-tight">Tavi — Command Center</h1>
-          </div>
-          <Link href="/admin" className="text-sm text-slate-600 hover:text-slate-900 underline">
-            DB Explorer →
-          </Link>
+        <div className="mx-auto max-w-[1400px] px-6 py-4 flex items-center justify-between gap-4">
+          <h1 className="text-xl font-semibold tracking-tight">Tavi — Command Center</h1>
+          <Nav currentWorkOrderId={workOrderId} />
         </div>
       </header>
 
       <main className="flex-1 mx-auto w-full max-w-[1400px] px-6 py-6 flex flex-col gap-4">
         {wo && <WorkOrderHeader wo={wo} onTick={onTick} ticking={ticking} />}
+
+        <ActivityLog log={activityLog} />
 
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-800">
@@ -288,9 +355,9 @@ export default function CommandCenter() {
 
         {negs && (
           <>
-            <Kanban byState={byState} onPick={setSelectedId} selectedId={selectedId} />
+            <Kanban byState={byState} onPick={handlePick} selectedId={selectedId} newIds={newIds} />
             {terminal.length > 0 && (
-              <TerminalSection negs={terminal} onPick={setSelectedId} selectedId={selectedId} />
+              <TerminalSection negs={terminal} onPick={handlePick} selectedId={selectedId} newIds={newIds} />
             )}
             {filteredOut.length > 0 && (
               <FilteredSection negs={filteredOut} />
@@ -359,6 +426,78 @@ function WorkOrderHeader({
             {ticking ? "Ticking…" : (<><span>Tick</span><span aria-hidden>⏩</span></>)}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Activity log — running feed of events across all ticks
+// ---------------------------------------------------------------------------
+
+function humanizeOutcome(outcome: string): string {
+  return outcome.replace(/_/g, " ");
+}
+
+const OUTCOME_COLOR: Record<string, string> = {
+  message_sent: "bg-sky-50 text-sky-800 border-sky-200",
+  verification_requested: "bg-sky-50 text-sky-800 border-sky-200",
+  verification_progress: "bg-sky-50 text-sky-800 border-sky-200",
+  confirmation_requested: "bg-indigo-50 text-indigo-800 border-indigo-200",
+  confirmation_handled: "bg-emerald-50 text-emerald-800 border-emerald-200",
+  refused: "bg-amber-50 text-amber-800 border-amber-200",
+  silence_timeout: "bg-red-50 text-red-800 border-red-200",
+  confirmation_timeout: "bg-red-50 text-red-800 border-red-200",
+  verification_timeout: "bg-red-50 text-red-800 border-red-200",
+  skipped: "bg-slate-50 text-slate-600 border-slate-200",
+  waiting: "bg-slate-50 text-slate-600 border-slate-200",
+  queued: "bg-slate-50 text-slate-600 border-slate-200",
+};
+
+function ActivityLog({ log }: { log: LogEntry[] }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Keep the top-of-list visible when new entries prepend (newest at top).
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+  }, [log]);
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl shadow-sm">
+      <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wide text-slate-500 font-medium">
+          Activity log
+        </div>
+        <div className="text-xs text-slate-400">
+          {log.length} event{log.length === 1 ? "" : "s"}
+        </div>
+      </div>
+      <div
+        ref={scrollRef}
+        className="max-h-32 overflow-y-auto px-4 py-2 text-xs space-y-1"
+      >
+        {log.length === 0 ? (
+          <div className="text-slate-400 italic py-1">
+            No events yet. Tick the work order to advance the negotiation.
+          </div>
+        ) : (
+          log.map((e) => {
+            const color = OUTCOME_COLOR[e.outcome] ?? "bg-slate-50 text-slate-700 border-slate-200";
+            return (
+              <div key={e.id} className="flex items-center gap-2">
+                <span className="font-mono text-slate-400 tabular-nums w-10 shrink-0">
+                  t{e.tick}
+                </span>
+                <span className="font-medium text-slate-800 truncate max-w-[16rem]">
+                  {e.vendorName}
+                </span>
+                <span className={`px-1.5 py-0.5 rounded border text-[10px] ${color}`}>
+                  {humanizeOutcome(e.outcome)}
+                </span>
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );
@@ -441,10 +580,12 @@ function Kanban({
   byState,
   onPick,
   selectedId,
+  newIds,
 }: {
   byState: Record<string, Negotiation[]>;
   onPick: (id: string) => void;
   selectedId: string | null;
+  newIds: ReadonlySet<string>;
 }) {
   return (
     <div className="grid grid-cols-5 gap-3 items-start">
@@ -455,6 +596,7 @@ function Kanban({
           negs={byState[s] ?? []}
           onPick={onPick}
           selectedId={selectedId}
+          newIds={newIds}
         />
       ))}
     </div>
@@ -466,11 +608,13 @@ function Column({
   negs,
   onPick,
   selectedId,
+  newIds,
 }: {
   state: NegotiationState;
   negs: Negotiation[];
   onPick: (id: string) => void;
   selectedId: string | null;
+  newIds: ReadonlySet<string>;
 }) {
   return (
     <div className="flex flex-col gap-2 min-h-[200px]">
@@ -480,7 +624,13 @@ function Column({
       </div>
       <div className="flex flex-col gap-2">
         {negs.map((n) => (
-          <Card key={n.id} n={n} onPick={onPick} selected={n.id === selectedId} />
+          <Card
+            key={n.id}
+            n={n}
+            onPick={onPick}
+            selected={n.id === selectedId}
+            isNew={newIds.has(n.id)}
+          />
         ))}
         {negs.length === 0 && (
           <div className="text-xs text-slate-400 italic px-1 py-2">—</div>
@@ -494,10 +644,12 @@ function Card({
   n,
   onPick,
   selected,
+  isNew,
 }: {
   n: Negotiation;
   onPick: (id: string) => void;
   selected: boolean;
+  isNew: boolean;
 }) {
   const last = lastMessage(n);
   const recent = last ? last.iteration : null;
@@ -508,10 +660,24 @@ function Card({
   return (
     <button
       onClick={() => onPick(n.id)}
-      className={`text-left w-full bg-white rounded-lg border p-3 shadow-sm transition-colors ${
-        selected ? "border-slate-900 ring-2 ring-slate-900/10" : "border-slate-200 hover:border-slate-400"
+      className={`text-left w-full bg-white rounded-lg border p-3 shadow-sm transition-colors relative ${
+        selected
+          ? "border-slate-900 ring-2 ring-slate-900/10"
+          : isNew
+          ? "border-emerald-400 ring-2 ring-emerald-400/30 hover:border-emerald-500"
+          : "border-slate-200 hover:border-slate-400"
       }`}
     >
+      {isNew && !selected && (
+        <span
+          className="absolute -top-1.5 -right-1.5 flex h-3 w-3"
+          aria-label="new message"
+          title="new message since you last opened this vendor"
+        >
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+          <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
+        </span>
+      )}
       <div className="flex items-center justify-between gap-2 mb-1">
         <div className="text-sm font-medium truncate">
           {n.vendor_display_name ?? n.vendor_place_id.slice(0, 8)}
@@ -557,10 +723,12 @@ function TerminalSection({
   negs,
   onPick,
   selectedId,
+  newIds,
 }: {
   negs: Negotiation[];
   onPick: (id: string) => void;
   selectedId: string | null;
+  newIds: ReadonlySet<string>;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -573,7 +741,13 @@ function TerminalSection({
       </summary>
       <div className="px-4 pb-3 grid grid-cols-5 gap-2">
         {negs.map((n) => (
-          <Card key={n.id} n={n} onPick={onPick} selected={n.id === selectedId} />
+          <Card
+            key={n.id}
+            n={n}
+            onPick={onPick}
+            selected={n.id === selectedId}
+            isNew={newIds.has(n.id)}
+          />
         ))}
       </div>
     </details>

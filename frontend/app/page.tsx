@@ -1,7 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
+
+import { Nav } from "@/components/Nav";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
@@ -69,6 +74,26 @@ const FIELD_LABELS: Record<string, string> = {
 
 const HIDDEN_FIELDS = new Set(["lat", "lng", "address_hint"]);
 
+// Must match backend REQUIRED_FIELDS in schemas.py. Kept here so the Submit
+// button can react immediately to local field changes (e.g. address pick)
+// without waiting for the next chat turn's server-side is_ready flag.
+const FRONTEND_REQUIRED_FIELDS: readonly string[] = [
+  "trade",
+  "description",
+  "address_line",
+  "city",
+  "state",
+  "zip",
+  "lat",
+  "lng",
+  "urgency",
+  "scheduled_for",
+  "budget_cap_cents",
+  "quality_threshold",
+  "requires_licensed",
+  "requires_insured",
+];
+
 function formatValue(key: string, value: unknown): string {
   if (value === null || value === undefined) return "—";
   if (key === "budget_cap_cents" && typeof value === "number") {
@@ -83,15 +108,47 @@ function formatValue(key: string, value: unknown): string {
   return String(value);
 }
 
+// Render the agent's markdown-formatted replies. Styled to fit the chat bubble;
+// headings downgraded since they look weird inline.
+function AssistantMarkdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkBreaks]}
+      components={{
+        p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+        strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+        em: ({ children }) => <em className="italic">{children}</em>,
+        ul: ({ children }) => <ul className="list-disc pl-5 mb-2 last:mb-0 space-y-1">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 last:mb-0 space-y-1">{children}</ol>,
+        li: ({ children }) => <li>{children}</li>,
+        code: ({ children }) => (
+          <code className="font-mono text-xs bg-slate-200 px-1 py-0.5 rounded">{children}</code>
+        ),
+        a: ({ href, children }) => (
+          <a href={href} target="_blank" rel="noreferrer" className="text-blue-600 underline">
+            {children}
+          </a>
+        ),
+        h1: ({ children }) => <p className="font-semibold mb-1">{children}</p>,
+        h2: ({ children }) => <p className="font-semibold mb-1">{children}</p>,
+        h3: ({ children }) => <p className="font-semibold mb-1">{children}</p>,
+        hr: () => <hr className="my-2 border-slate-300" />,
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [fields, setFields] = useState<Fields>({});
-  const [isReady, setIsReady] = useState(false);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
   const [submittedId, setSubmittedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Address autocomplete state
   const [addressQuery, setAddressQuery] = useState("");
@@ -100,6 +157,16 @@ export default function Home() {
   const [addressError, setAddressError] = useState<string | null>(null);
   const [selectedAddress, setSelectedAddress] = useState<SelectedAddress | null>(null);
   const [hintApplied, setHintApplied] = useState(false);
+
+  // Derived, always-fresh: do we have every required field? Recomputes on
+  // every fields change (including address pick), so the Submit button
+  // appears immediately without needing another chat turn.
+  const isReady = useMemo(() => {
+    return FRONTEND_REQUIRED_FIELDS.every((f) => {
+      const v = fields[f];
+      return v !== null && v !== undefined && v !== "";
+    });
+  }, [fields]);
 
   useEffect(() => {
     fetch(`${API_BASE}/intake/start`, { method: "POST" })
@@ -120,6 +187,14 @@ export default function Home() {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, pending]);
+
+  // Auto-grow the message textarea up to a cap; scroll inside past that.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [input]);
 
   // Seed the autocomplete input from an LLM-extracted chat address ONCE, only
   // if the user hasn't selected or typed anything yet. Lets the LLM surface
@@ -209,7 +284,7 @@ export default function Home() {
       }
       return next;
     });
-    setIsReady(false);
+    // isReady auto-derives from fields — no explicit reset needed.
   }
 
   async function callChat(nextMessages: Message[]) {
@@ -225,7 +300,7 @@ export default function Home() {
       const d: ChatResponse = await r.json();
       setMessages([...nextMessages, { role: "assistant", content: d.reply }]);
       setFields(d.fields ?? {});
-      setIsReady(Boolean(d.is_ready));
+      // isReady is derived from fields, no explicit set.
     } catch (e: unknown) {
       setError(`Chat failed: ${String(e)}`);
     } finally {
@@ -286,14 +361,12 @@ export default function Home() {
   return (
     <div className="flex-1 flex flex-col bg-slate-50 text-slate-900">
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
+        <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between gap-4">
           <div>
             <h1 className="text-xl font-semibold tracking-tight">Tavi — Work Order Intake</h1>
             <p className="text-sm text-slate-500">Pick the service address, then chat with the agent.</p>
           </div>
-          <Link href="/admin" className="text-sm text-slate-600 hover:text-slate-900 underline">
-            DB Explorer →
-          </Link>
+          <Nav currentWorkOrderId={submittedId ?? undefined} />
         </div>
       </header>
 
@@ -366,15 +439,15 @@ export default function Home() {
             )}
             {messages.map((m, i) => (
               <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                <div
-                  className={
-                    m.role === "user"
-                      ? "max-w-[80%] rounded-2xl px-4 py-2 whitespace-pre-wrap bg-slate-900 text-white"
-                      : "max-w-[80%] rounded-2xl px-4 py-2 whitespace-pre-wrap bg-slate-100 text-slate-900"
-                  }
-                >
-                  {m.content}
-                </div>
+                {m.role === "user" ? (
+                  <div className="max-w-[80%] rounded-2xl px-4 py-2 whitespace-pre-wrap bg-slate-900 text-white">
+                    {m.content}
+                  </div>
+                ) : (
+                  <div className="max-w-[80%] rounded-2xl px-4 py-2 bg-slate-100 text-slate-900">
+                    <AssistantMarkdown content={m.content} />
+                  </div>
+                )}
               </div>
             ))}
             {pending && (
@@ -419,13 +492,14 @@ export default function Home() {
 
           <form onSubmit={handleSubmit} className="border-t border-slate-200 p-4 flex gap-2 items-end">
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={submittedId ? "Work order submitted." : "Type your message…  (Shift+Enter for new line)"}
               disabled={pending || !!submittedId}
               rows={1}
-              className="flex-1 resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900 disabled:bg-slate-50 disabled:text-slate-400"
+              className="flex-1 resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900 disabled:bg-slate-50 disabled:text-slate-400 max-h-[200px] overflow-y-auto"
             />
             <button
               type="submit"

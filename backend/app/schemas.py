@@ -281,6 +281,19 @@ class DiscoveryRunRead(BaseModel):
     duration_ms: Optional[int] = None
 
 
+class DiscoveryEventRead(BaseModel):
+    """One progress event written mid-discovery."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    work_order_id: str
+    created_at: datetime
+    kind: str
+    vendor_name: Optional[str] = None
+    detail: Optional[str] = None
+
+
 class DiscoveryRunRequest(BaseModel):
     work_order_id: str
     refresh: bool = False  # if True, ignore the 24h cached-run idempotency window

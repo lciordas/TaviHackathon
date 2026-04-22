@@ -14,7 +14,8 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ...config import settings
-from ...models import DiscoveryRun, Negotiation, Vendor, WorkOrder
+from ...database import SessionLocal
+from ...models import DiscoveryEvent, DiscoveryRun, Negotiation, Vendor, WorkOrder
 from . import bbb_client, cache, places_client, scoring
 from .filters import apply_filters
 from .geocoding import geocode
@@ -22,6 +23,33 @@ from .trade_map import name_matches_keywords, spec_for
 
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_event(
+    work_order_id: str,
+    kind: str,
+    *,
+    vendor_name: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> None:
+    """Write one progress row on its own short-lived session.
+
+    Uses a separate session so the row is committed independently of the
+    long-running discovery transaction — the frontend sees events the
+    moment they happen, even while the main run is still in flight.
+    Best-effort: swallow failures rather than blowing up the orchestrator.
+    """
+    try:
+        with SessionLocal() as s:
+            s.add(DiscoveryEvent(
+                work_order_id=work_order_id,
+                kind=kind,
+                vendor_name=vendor_name,
+                detail=detail,
+            ))
+            s.commit()
+    except Exception:
+        logger.exception("failed to emit discovery event (%s) for %s", kind, work_order_id)
 
 
 CACHED_RUN_WINDOW = timedelta(hours=24)
@@ -87,6 +115,17 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
         spec = spec_for(work_order.trade)
         radius_m = settings.google_places_default_radius_m
 
+        radius_mi = int(round(radius_m / 1609.344))
+        _emit_event(
+            work_order.id,
+            "search_start",
+            detail=(
+                f"Searching {work_order.trade.value} vendors near "
+                f"{work_order.city or '—'}, {work_order.state or ''} "
+                f"({radius_mi}mi radius)"
+            ),
+        )
+
         if spec.strategy == "searchNearby":
             candidate_ids = pc.search_nearby(
                 lat=work_order.lat,
@@ -108,6 +147,11 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
             candidate_ids = [r["id"] for r in results]
 
         candidate_count = len(candidate_ids)
+        _emit_event(
+            work_order.id,
+            "candidates",
+            detail=f"{candidate_count} candidate place{'s' if candidate_count != 1 else ''} found",
+        )
 
         # 3. Pull details for new place_ids; reuse cache for known ones.
         existing = cache.get_vendors(db, candidate_ids)
@@ -117,6 +161,12 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
         for pid in candidate_ids:
             v = existing.get(pid)
             if v is not None and cache.is_google_fresh(v):
+                _emit_event(
+                    work_order.id,
+                    "place_cached",
+                    vendor_name=v.display_name,
+                    detail=v.formatted_address,
+                )
                 continue
             try:
                 payload = pc.get_place(pid)
@@ -126,6 +176,12 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
             api_detail_calls += 1
             mapping = places_client.details_to_vendor_payload(payload)
             cache.upsert_google(db, mapping)
+            _emit_event(
+                work_order.id,
+                "place_details",
+                vendor_name=mapping.get("display_name"),
+                detail=mapping.get("formatted_address"),
+            )
         db.flush()
 
         # 4. Refetch cached vendor rows now that we've upserted.
@@ -168,8 +224,27 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
                     "bbb_complaints_resolved": profile.complaints_resolved,
                     "years_in_business": profile.years_in_business,
                 }
+                yrs = profile.years_in_business
+                bbb_detail = (
+                    f"BBB {profile.grade or 'N/A'}"
+                    + (f" · {yrs} yrs in business" if yrs else "")
+                )
+            else:
+                bbb_detail = "no BBB profile found"
             cache.upsert_bbb(db, pid, payload)
+            _emit_event(
+                work_order.id,
+                "bbb_scrape",
+                vendor_name=v.display_name,
+                detail=bbb_detail,
+            )
         db.flush()
+
+        _emit_event(
+            work_order.id,
+            "scoring",
+            detail=f"Scoring {len(vendors)} vendor{'s' if len(vendors) != 1 else ''}",
+        )
 
         # 7. Recompute cumulative scores after enrichment. Also score the
         #    name-filtered vendors (pure CPU, no API cost) so the admin UI
@@ -243,6 +318,20 @@ def run_discovery(db: Session, work_order_id: str, *, refresh: bool = False) -> 
 
         run.duration_ms = int((time.monotonic() - started) * 1000)
         db.commit()
+
+        eligible = sum(1 for v in vendors.values())
+        filtered_out_count = len(name_filtered) + sum(
+            1 for v in vendors.values()
+            if apply_filters(work_order, v, (v.cumulative_score_breakdown or {}).get("bayes_rating_1_to_5") if v.cumulative_score_breakdown else None).passed is False
+        )
+        _emit_event(
+            work_order.id,
+            "done",
+            detail=(
+                f"{eligible} eligible, {filtered_out_count} filtered · "
+                f"{run.duration_ms}ms"
+            ),
+        )
         return run
     finally:
         pc.close()

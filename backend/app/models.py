@@ -134,6 +134,31 @@ class Vendor(Base):
     bbb_fetched_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class DiscoveryEvent(Base):
+    """Per-step discovery progress for the command-center live log.
+
+    Written from `run_discovery` via a separate session so each event is
+    visible to the frontend the instant it happens — before the main
+    discovery transaction commits. Read-only from the frontend's
+    perspective; kept short so it's cheap to poll while the user waits.
+    """
+
+    __tablename__ = "discovery_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    work_order_id: Mapped[str] = mapped_column(
+        String, ForeignKey("work_orders.id"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+    # e.g. "search_start" | "candidates" | "place_details" | "bbb_scrape"
+    # | "scoring" | "done". No enum — kept as a plain string so new kinds
+    # can be added from the orchestrator without a migration.
+    kind: Mapped[str] = mapped_column(String)
+    vendor_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class DiscoveryRun(Base):
     """One row per `/discovery/run` invocation. Audit + cost tracking."""
 

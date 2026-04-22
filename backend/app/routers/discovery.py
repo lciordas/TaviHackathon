@@ -6,8 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import DiscoveryRun, Negotiation, Vendor
+from ..models import DiscoveryEvent, DiscoveryRun, Negotiation, Vendor
 from ..schemas import (
+    DiscoveryEventRead,
     DiscoveryRunRead,
     DiscoveryRunRequest,
     DiscoveryRunResponse,
@@ -71,3 +72,26 @@ def get_run(run_id: str, db: Session = Depends(get_db)) -> DiscoveryRunResponse:
     if run_row is None:
         raise HTTPException(status_code=404, detail="DiscoveryRun not found")
     return _hydrate(db, run_row)
+
+
+@router.get(
+    "/events/by_work_order/{work_order_id}",
+    response_model=list[DiscoveryEventRead],
+)
+def events_by_work_order(
+    work_order_id: str,
+    db: Session = Depends(get_db),
+) -> list[DiscoveryEventRead]:
+    """Chronological list of discovery progress events for a work order.
+
+    Used by the command-center activity log to stream real-time progress
+    while the background discovery task is running. Returns [] if no events
+    exist yet.
+    """
+    rows = (
+        db.query(DiscoveryEvent)
+        .filter(DiscoveryEvent.work_order_id == work_order_id)
+        .order_by(DiscoveryEvent.created_at.asc())
+        .all()
+    )
+    return [DiscoveryEventRead.model_validate(r) for r in rows]
